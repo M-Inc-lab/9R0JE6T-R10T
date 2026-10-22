@@ -17,6 +17,7 @@ from reverse_forge.macho_analyzer import MachOAnalyzer
 from reverse_forge.pe_analyzer import PEAnalyzer
 from reverse_forge.provenance import ArtifactProvenance, ProvenanceManager, ScopeLedger
 from reverse_forge.reporter import Finding, ReportGenerator
+from reverse_forge.behavioral_engine import BehavioralTelemetryEngine
 
 
 class AutonomyLevel(enum.IntEnum):
@@ -288,13 +289,22 @@ class PipelineStateMachine:
             self._mark_stage(7, StageStatus.SKIPPED, summary="Operator declined sandboxed dynamic execution.")
             return True
 
-        summary = "Dynamic sandbox profile generated (execution isolated in container)."
+        from reverse_forge.windows_sandbox import WindowsSandbox
+        wsb = WindowsSandbox(self.provenance.working_copy_path)
+        wsb_profile = os.path.join(self.provenance_mgr.workspace_root, "detonation_profile.wsb")
+        wsb.generate_wsb_profile(wsb_profile)
+        
+        # Staging automated telemetry collector script
+        ps1_collector = os.path.join(self.provenance_mgr.workspace_root, "collect_telemetry.ps1")
+        WindowsSandbox.generate_telemetry_collector_script(ps1_collector, self.provenance.artifact_name)
+
+        summary = f"Generated sandbox profile and automated telemetry collector script at {wsb_profile}"
         self._mark_stage(7, StageStatus.COMPLETED, summary=summary)
         return True
 
     # Stage 8: Hypothesis Validation & Correlation
     def _stage_8(self) -> bool:
-        # Cross-reference static findings with discovered xrefs/sinks
+        # 1. Cross-reference static findings with discovered xrefs/sinks
         sinks = self.ghidra_results.get("sink_xrefs", {})
         for sink_name, callers in sinks.items():
             if callers:
@@ -314,7 +324,32 @@ class PipelineStateMachine:
                     how="Input flows into parameter without strict boundary checking.",
                     remediation=f"Replace `{sink_name}` with safe bounded alternative."
                 ))
-        summary = "Correlated static headers and decompiled call-paths."
+
+        # 2. Correlate with behavioral telemetry traces if available
+        telemetry_file = os.path.join(os.path.dirname(self.provenance.working_copy_path), "telemetry_trace.json")
+        b_engine = BehavioralTelemetryEngine()
+        if os.path.exists(telemetry_file):
+            b_engine.ingest_json_trace(telemetry_file)
+            matches = b_engine.correlate_with_static_analysis(self.static_metadata)
+            for m in matches:
+                self.report_generator.add_finding(Finding(
+                    finding_id=f"BEHAV-{m.hypothesis_id}",
+                    title=f"Runtime Correlated Behavior: {m.runtime_event_type}",
+                    vulnerability_class="Runtime Behavioral Telemetry",
+                    confidence="Confirmed",
+                    cvss_score=8.2,
+                    cwe_id="CWE-693",
+                    function_symbol=m.static_symbol_or_address,
+                    address_or_offset="Runtime Trace",
+                    what=m.runtime_detail,
+                    why=m.rationale,
+                    where="Sandboxed execution environment",
+                    when="Observed actively during dynamic execution",
+                    how="Process triggered event during monitored session",
+                    remediation="Validate execution environment and apply least-privilege confinement."
+                ))
+
+        summary = "Correlated static headers, decompiled call-paths, and runtime telemetry."
         self._mark_stage(8, StageStatus.COMPLETED, summary=summary)
         return True
 

@@ -153,6 +153,12 @@ def main():
     pipe_p.add_argument("--output-json", help="Path to write final report JSON")
     pipe_p.add_argument("--output-md", help="Path to write final report Markdown")
 
+    # behavioral-correlate (dynamic runtime correlation)
+    behav_p = subparsers.add_parser("behavioral-correlate", help="Correlate runtime sandbox telemetry JSON with static analysis")
+    behav_p.add_argument("--trace", "-t", required=True, help="Path to runtime telemetry trace JSON")
+    behav_p.add_argument("--binary", "-b", help="Path to analyzed binary for static cross-reference")
+    behav_p.add_argument("--output", "-o", help="Path to write correlation JSON output")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -280,6 +286,21 @@ def main():
 
         if not args.output_json and not args.output_md:
             print("\n" + res["report_markdown"])
+
+    elif args.command == "behavioral-correlate":
+        _require_existing_file(args.trace)
+        from reverse_forge.behavioral_engine import BehavioralTelemetryEngine
+        b_engine = BehavioralTelemetryEngine()
+        counts = b_engine.ingest_json_trace(args.trace)
+        print(f"[*] Ingested runtime trace: {counts}")
+
+        static_ctx: Dict[str, Any] = {}
+        if args.binary and os.path.exists(args.binary):
+            static_ctx["strings"] = extract_strings(args.binary)
+
+        matches = b_engine.correlate_with_static_analysis(static_ctx)
+        summary = b_engine.generate_behavioral_summary()
+        _write_or_print(summary, args.output, "Behavioral Correlation")
 
 
 if __name__ == "__main__":

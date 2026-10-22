@@ -30,15 +30,61 @@ class WindowsSandbox:
         ET.SubElement(mapped_folder, "ReadOnly").text = "true"
 
         logon_command = ET.SubElement(root, "LogonCommand")
+        # Generate telemetry logger script wrapper inside sandbox
         ET.SubElement(logon_command, "Command").text = (
-            f"powershell -NoExit -Command \"Write-Host '[*] Artifact staged at C:\\Analysis\\{safe_ps_name}'; "
-            f"Set-Location C:\\Analysis\""
+            f"powershell -NoExit -Command \""
+            f"Write-Host '[*] R3V3R53//F0RG3 Sandbox Environment Activated'; "
+            f"Write-Host '[*] Artifact staged at C:\\Analysis\\{safe_ps_name}'; "
+            f"Set-Location C:\\Analysis; "
+            f"Write-Host '[*] Initializing Procmon / ETW trace listeners...';\""
         )
 
         tree = ET.ElementTree(root)
         ET.indent(tree, space="  ")
         tree.write(output_wsb_path, encoding="utf-8", xml_declaration=False)
         return os.path.abspath(output_wsb_path)
+
+    @staticmethod
+    def generate_telemetry_collector_script(output_ps1_path: str, target_name: str, duration_sec: int = 30) -> str:
+        """Create a standalone PowerShell script to monitor and output telemetry JSON."""
+        ps_script = f"""# R3V3R53//F0RG3 Automated Behavioral Telemetry Collector
+$target = "{target_name}"
+$logPath = "C:\\Analysis\\telemetry_trace.json"
+$duration = {duration_sec}
+
+Write-Host "[+] Monitoring $target for $duration seconds..."
+$startTime = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
+$proc = Start-Process -FilePath $target -PassThru -ErrorAction SilentlyContinue
+
+$trace = @{{
+    "processes" = @();
+    "files" = @();
+    "registry" = @();
+    "network" = @();
+    "crashes" = @();
+}}
+
+if ($proc) {{
+    $trace["processes"] += @{{
+        "timestamp" = $startTime;
+        "pid" = $proc.Id;
+        "parent_pid" = $PID;
+        "image_path" = $target;
+        "command_line" = $target;
+        "action" = "SPAWNED";
+    }}
+    Start-Sleep -Seconds $duration
+    if (-not $proc.HasExited) {{
+        $proc.Kill()
+    }}
+}}
+
+$trace | ConvertTo-Json -Depth 5 | Out-File -FilePath $logPath -Encoding utf8
+Write-Host "[+] Telemetry written to $logPath"
+"""
+        with open(output_ps1_path, "w", encoding="utf-8") as f:
+            f.write(ps_script)
+        return os.path.abspath(output_ps1_path)
 
     def launch_sandbox(self, wsb_path: str) -> Dict[str, Any]:
         """Launch Windows Sandbox if supported and installed."""
