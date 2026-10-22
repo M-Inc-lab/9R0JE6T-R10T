@@ -3,11 +3,14 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 from typing import Dict, Any, List
 
 from reverse_forge.pe_analyzer import PEAnalyzer
+from reverse_forge.elf_analyzer import ELFAnalyzer
+from reverse_forge.macho_analyzer import MachOAnalyzer
+from reverse_forge.tool_installer import ToolchainInstaller
+from reverse_forge.correlation_engine import CorrelationEngine
 
 def hash_file(filepath: str) -> Dict[str, str]:
     sha256 = hashlib.sha256()
@@ -55,56 +58,26 @@ def extract_strings(filepath: str, min_len: int = 5) -> Dict[str, List[str]]:
         categorized[k] = list(dict.fromkeys(categorized[k]))
     return categorized
 
-def detect_tools() -> Dict[str, Any]:
-    tools = {
-        "ghidra": shutil.which("analyzeHeadless") or shutil.which("ghidra"),
-        "radare2": shutil.which("r2") or shutil.which("radare2"),
-        "ida_pro": shutil.which("ida64") or shutil.which("idat64"),
-        "cutter": shutil.which("cutter"),
-        "dumpbin": shutil.which("dumpbin"),
-        "sigcheck": shutil.which("sigcheck") or shutil.which("sigcheck64"),
-        "powershell": shutil.which("pwsh") or shutil.which("powershell"),
-        "gdb": shutil.which("gdb"),
-        "python": sys.executable
-    }
-    return {k: {"available": bool(v), "path": v} for k, v in tools.items()}
-
-def triage_binary(filepath: str) -> Dict[str, Any]:
-    if not os.path.exists(filepath):
-        raise FileNotFoundError(f"Artifact not found: {filepath}")
-
-    size = os.path.getsize(filepath)
-    hashes = hash_file(filepath)
-
-    with open(filepath, "rb") as f:
-        content = f.read()
-
-    pe_info = PEAnalyzer(content).analyze()
-
-    is_high_entropy = pe_info.get("entropy", 0.0) > 7.0
-    pack_indicator = "Potential Packer / Compression detected (Entropy > 7.0)" if is_high_entropy else "Standard entropy"
-
-    return {
-        "artifact": os.path.abspath(filepath),
-        "filename": os.path.basename(filepath),
-        "size_bytes": size,
-        "hashes": hashes,
-        "pe_metadata": pe_info,
-        "heuristic_pack_check": pack_indicator,
-        "tools_status": detect_tools()
-    }
-
 def main():
-    parser = argparse.ArgumentParser(description="R3V3R53//F0RG3 Autonomous Triage & Reverse Engineering Engine")
+    parser = argparse.ArgumentParser(description="R3V3R53//F0RG3 Autonomous Multi-Tool Cross-Platform Reverse Engineering Engine")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # detect-tools
-    subparsers.add_parser("detect-tools", help="Discover local reverse engineering toolchain")
+    subparsers.add_parser("detect-tools", help="Discover local/managed reverse engineering toolchain")
 
-    # triage
-    triage_p = subparsers.add_parser("triage", help="Perform Stage 0-3 static triage on an artifact")
+    # bootstrap
+    boot_p = subparsers.add_parser("bootstrap", help="Automatically download and install required analysis tools")
+    boot_p.add_argument("--tool", choices=["r2", "capstone", "all"], default="all", help="Tool to provision")
+
+    # inspect / triage
+    triage_p = subparsers.add_parser("triage", help="Perform cross-platform format triage (PE, ELF, Mach-O)")
     triage_p.add_argument("--input", "-i", required=True, help="Target binary artifact path")
     triage_p.add_argument("--output", "-o", help="Path to write JSON results")
+
+    # correlate
+    corr_p = subparsers.add_parser("correlate", help="Combinational multi-engine correlation analysis")
+    corr_p.add_argument("--input", "-i", required=True, help="Target binary artifact path")
+    corr_p.add_argument("--output", "-o", help="Path to write JSON results")
 
     # strings
     str_p = subparsers.add_parser("strings", help="Extract and categorize strings from binary")
@@ -113,17 +86,60 @@ def main():
     str_p.add_argument("--min-len", type=int, default=5, help="Minimum string length")
 
     args = parser.parse_args()
+    installer = ToolchainInstaller()
 
     if args.command == "detect-tools":
-        results = detect_tools()
+        results = installer.detect_all()
         print(json.dumps(results, indent=2))
 
+    elif args.command == "bootstrap":
+        if args.tool == "r2":
+            res = installer.install_radare2()
+        elif args.tool == "capstone":
+            res = installer.install_capstone_disassembler()
+        else:
+            res = installer.bootstrap_all()
+        print(json.dumps(res, indent=2))
+
     elif args.command == "triage":
-        res = triage_binary(args.input)
+        if not os.path.exists(args.input):
+            sys.exit(f"Error: Artifact not found: {args.input}")
+        with open(args.input, "rb") as f:
+            data = f.read()
+
+        engine = CorrelationEngine()
+        fmt = engine.identify_format(data)
+        if fmt == "PE":
+            meta = PEAnalyzer(data).analyze()
+        elif fmt == "ELF":
+            meta = ELFAnalyzer(data).analyze()
+        elif fmt == "Mach-O":
+            meta = MachOAnalyzer(data).analyze()
+        else:
+            meta = {"format": "Unknown/Raw Binary", "entropy": PEAnalyzer.calculate_entropy(data)}
+
+        res = {
+            "artifact": os.path.abspath(args.input),
+            "filename": os.path.basename(args.input),
+            "size_bytes": os.path.getsize(args.input),
+            "hashes": hash_file(args.input),
+            "format": fmt,
+            "metadata": meta
+        }
         if args.output:
             with open(args.output, "w", encoding="utf-8") as f:
                 json.dump(res, f, indent=2)
             print(f"Success: Triage analysis written to {args.output}")
+        else:
+            print(json.dumps(res, indent=2))
+
+    elif args.command == "correlate":
+        engine = CorrelationEngine()
+        res = engine.analyze_artifact(args.input)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(res, f, indent=2)
+            print(f"Success: Correlated analysis written to {args.output}")
         else:
             print(json.dumps(res, indent=2))
 
