@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import sys
 from typing import Dict, Any, List
 
@@ -11,8 +12,10 @@ from reverse_forge.elf_analyzer import ELFAnalyzer
 from reverse_forge.macho_analyzer import MachOAnalyzer
 from reverse_forge.tool_installer import ToolchainInstaller
 from reverse_forge.correlation_engine import CorrelationEngine
-from reverse_forge.windows_engine import WindowsEngine
 from reverse_forge.windows_sandbox import WindowsSandbox
+
+MAX_STRING_SCAN_BYTES = 64 * 1024 * 1024
+
 
 def hash_file(filepath: str) -> Dict[str, str]:
     sha256 = hashlib.sha256()
@@ -23,11 +26,13 @@ def hash_file(filepath: str) -> Dict[str, str]:
             md5.update(chunk)
     return {"sha256": sha256.hexdigest(), "md5": md5.hexdigest()}
 
-def extract_strings(filepath: str, min_len: int = 5) -> Dict[str, List[str]]:
-    with open(filepath, "rb") as f:
-        data = f.read()
 
-    ascii_pattern = re.compile(rb"[\x20-\x7e]{" + str(min_len).encode() + rb",}")
+def extract_strings(filepath: str, min_len: int = 5, max_bytes: int = MAX_STRING_SCAN_BYTES) -> Dict[str, List[str]]:
+    min_len = max(1, int(min_len))
+    with open(filepath, "rb") as f:
+        data = f.read(max_bytes)
+
+    ascii_pattern = re.compile(rb"[\x20-\x7e]{" + str(min_len).encode("ascii") + rb",}")
     matches = [m.group(0).decode("ascii", errors="ignore") for m in ascii_pattern.finditer(data)]
 
     categorized: Dict[str, List[str]] = {
@@ -60,8 +65,16 @@ def extract_strings(filepath: str, min_len: int = 5) -> Dict[str, List[str]]:
         categorized[k] = list(dict.fromkeys(categorized[k]))
     return categorized
 
+
+def _require_existing_file(filepath: str) -> None:
+    if not os.path.exists(filepath):
+        sys.exit(f"Error: Artifact not found: {filepath}")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="R3V3R53//F0RG3 Autonomous Multi-Tool Cross-Platform Reverse Engineering Engine")
+    parser = argparse.ArgumentParser(
+        description="R3V3R53//F0RG3 Autonomous Multi-Tool Cross-Platform Reverse Engineering Engine"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # detect-tools
@@ -72,7 +85,7 @@ def main():
     boot_p.add_argument("--tool", choices=["r2", "capstone", "all"], default="all", help="Tool to provision")
 
     # triage
-    triage_p = subparsers.add_parser("triage", help="Perform cross-platform format triage (PE, ELF, Mach-O)")
+    triage_p = subparsers.add_parser("triage", help="Perform cross-platform format triage (PE, ELF, Mach-O, JVM)")
     triage_p.add_argument("--input", "-i", required=True, help="Target binary artifact path")
     triage_p.add_argument("--output", "-o", help="Path to write JSON results")
 
@@ -98,7 +111,7 @@ def main():
     wiat_p.add_argument("--output", "-o", help="Path to write JSON results")
 
     # win-audit
-    waudit_p = subparsers.add_parser("win-audit", help="Full 12-stage Windows PE vulnerability audit")
+    waudit_p = subparsers.add_parser("win-audit", help="Full Windows PE vulnerability audit")
     waudit_p.add_argument("--input", "-i", required=True, help="Target Windows PE binary")
     waudit_p.add_argument("--output", "-o", help="Path to write JSON results")
 
@@ -124,8 +137,7 @@ def main():
         print(json.dumps(res, indent=2))
 
     elif args.command == "triage":
-        if not os.path.exists(args.input):
-            sys.exit(f"Error: Artifact not found: {args.input}")
+        _require_existing_file(args.input)
         with open(args.input, "rb") as f:
             data = f.read()
 
@@ -137,6 +149,14 @@ def main():
             meta = ELFAnalyzer(data).analyze()
         elif fmt == "Mach-O":
             meta = MachOAnalyzer(data).analyze()
+        elif fmt == "JVM Class":
+            minor_v, major_v = struct.unpack_from(">HH", data, 4)
+            meta = {
+                "format": "JVM Class Bytecode",
+                "architecture": "JVM",
+                "class_version": f"{major_v}.{minor_v}",
+                "entropy": PEAnalyzer.calculate_entropy(data),
+            }
         else:
             meta = {"format": "Unknown/Raw Binary", "entropy": PEAnalyzer.calculate_entropy(data)}
 
@@ -156,6 +176,7 @@ def main():
             print(json.dumps(res, indent=2))
 
     elif args.command == "correlate":
+        _require_existing_file(args.input)
         engine = CorrelationEngine()
         res = engine.analyze_artifact(args.input)
         if args.output:
@@ -166,6 +187,7 @@ def main():
             print(json.dumps(res, indent=2))
 
     elif args.command == "strings":
+        _require_existing_file(args.input)
         res = extract_strings(args.input, min_len=args.min_len)
         if args.output:
             with open(args.output, "w", encoding="utf-8") as f:
@@ -174,40 +196,33 @@ def main():
         else:
             print(json.dumps(res, indent=2))
 
-    elif args.command == "win-checksec":
+    elif args.command in ("win-checksec", "win-iat", "win-audit"):
+        _require_existing_file(args.input)
+        from reverse_forge.windows_engine import WindowsEngine
         wengine = WindowsEngine(args.input)
-        res = wengine.check_mitigations()
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
-                json.dump(res, f, indent=2)
-            print(f"Success: Checksec written to {args.output}")
+        if args.command == "win-checksec":
+            res = wengine.check_mitigations()
+            msg = "Checksec"
+        elif args.command == "win-iat":
+            res = wengine.inspect_iat()
+            msg = "IAT analysis"
         else:
-            print(json.dumps(res, indent=2))
+            res = wengine.full_audit()
+            msg = "Windows audit"
 
-    elif args.command == "win-iat":
-        wengine = WindowsEngine(args.input)
-        res = wengine.inspect_iat()
         if args.output:
             with open(args.output, "w", encoding="utf-8") as f:
                 json.dump(res, f, indent=2)
-            print(f"Success: IAT analysis written to {args.output}")
-        else:
-            print(json.dumps(res, indent=2))
-
-    elif args.command == "win-audit":
-        wengine = WindowsEngine(args.input)
-        res = wengine.full_audit()
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
-                json.dump(res, f, indent=2)
-            print(f"Success: Windows audit written to {args.output}")
+            print(f"Success: {msg} written to {args.output}")
         else:
             print(json.dumps(res, indent=2))
 
     elif args.command == "win-sandbox":
+        _require_existing_file(args.input)
         wsb = WindowsSandbox(args.input)
         out = wsb.generate_wsb_profile(args.output)
         print(f"[+] Windows Sandbox profile generated: {out}")
+
 
 if __name__ == "__main__":
     main()

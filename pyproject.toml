@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reverse-forge"
+version = "1.0.0"
+description = "R3V3R53//F0RG3 - Cross-Platform Binary Triage & Vulnerability Research Engine"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "GPL-3.0-only"}
+dependencies = [
+    "pefile>=2023.2.7",
+    "capstone>=5.0.0",
+]
+
+[project.optional-dependencies]
+colab = [
+    "fastmcp>=0.4.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "pydantic>=2.0.0",
+]
+
+[project.scripts]
+reverse-forge = "reverse_forge.cli:main"

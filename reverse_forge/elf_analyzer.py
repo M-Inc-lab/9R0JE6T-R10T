@@ -2,6 +2,7 @@ import math
 import struct
 from typing import Dict, Any, List
 
+
 class ELFAnalyzer:
     """Pure-Python ELF32 and ELF64 header, segment, and section analyzer."""
 
@@ -17,6 +18,7 @@ class ELFAnalyzer:
             "architecture": "Unknown",
             "type": "Unknown",
             "entry_point": 0,
+            "entry_file_offset": None,
             "segments": [],
             "sections": [],
             "nx_enabled": None,
@@ -79,91 +81,128 @@ class ELFAnalyzer:
         result["architecture"] = machines.get(e_machine, f"Unknown (0x{e_machine:04X})")
         result["entry_point"] = hex(e_entry)
 
-        # Parse Program Headers (Segments)
         p_types = {
             0: "PT_NULL", 1: "PT_LOAD", 2: "PT_DYNAMIC", 3: "PT_INTERP",
             4: "PT_NOTE", 5: "PT_SHLIB", 6: "PT_PHDR", 7: "PT_TLS",
             0x6474E551: "PT_GNU_STACK"
         }
 
-        for i in range(e_phnum):
-            cur = e_phoff + (i * e_phentsize)
-            if cur + e_phentsize > self.length:
-                break
-            if is_64:
-                p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align = struct.unpack_from(
-                    endian_char + "IIQQQQQQ", self.data, cur
+        min_phentsize = 56 if is_64 else 32
+        if e_phoff > 0 and e_phnum > 0:
+            if e_phentsize < min_phentsize:
+                result["warnings"].append(
+                    f"Malformed e_phentsize ({e_phentsize} < {min_phentsize}); skipping program headers"
                 )
             else:
-                p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align = struct.unpack_from(
-                    endian_char + "IIIIIIII", self.data, cur
-                )
-
-            type_name = p_types.get(p_type, f"0x{p_type:08X}")
-            r = bool(p_flags & 4)
-            w = bool(p_flags & 2)
-            x = bool(p_flags & 1)
-
-            if p_type == 0x6474E551:  # PT_GNU_STACK
-                result["nx_enabled"] = not x  # NX is enabled if stack is non-executable
-
-            result["segments"].append({
-                "type": type_name,
-                "offset": hex(p_offset),
-                "virtual_address": hex(p_vaddr),
-                "file_size": p_filesz,
-                "mem_size": p_memsz,
-                "readable": r,
-                "writable": w,
-                "executable": x
-            })
-
-        # Parse Section Headers
-        if e_shoff > 0 and e_shnum > 0 and e_shstrndx < e_shnum:
-            # First extract shstrtab offset
-            str_header_offset = e_shoff + (e_shstrndx * e_shentsize)
-            if str_header_offset + e_shentsize <= self.length:
-                if is_64:
-                    _, _, _, _, strtab_offset, strtab_size, _, _, _, _ = struct.unpack_from(
-                        endian_char + "IIQQQQIIQQ", self.data, str_header_offset
-                    )
-                else:
-                    _, _, _, _, strtab_offset, strtab_size, _, _, _, _ = struct.unpack_from(
-                        endian_char + "IIIIIIIIII", self.data, str_header_offset
-                    )
-                strtab_data = self.data[strtab_offset:strtab_offset + strtab_size] if strtab_offset + strtab_size <= self.length else b""
-
-                for i in range(e_shnum):
-                    cur_sh = e_shoff + (i * e_shentsize)
-                    if cur_sh + e_shentsize > self.length:
+                for i in range(min(e_phnum, 1024)):
+                    cur = e_phoff + (i * e_phentsize)
+                    if cur + min_phentsize > self.length or cur + e_phentsize > self.length:
+                        result["warnings"].append("Truncated ELF program header table")
                         break
                     if is_64:
-                        sh_name_idx, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize = struct.unpack_from(
-                            endian_char + "IIQQQQIIQQ", self.data, cur_sh
+                        p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align = struct.unpack_from(
+                            endian_char + "IIQQQQQQ", self.data, cur
                         )
                     else:
-                        sh_name_idx, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize = struct.unpack_from(
-                            endian_char + "IIIIIIIIII", self.data, cur_sh
+                        p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align = struct.unpack_from(
+                            endian_char + "IIIIIIII", self.data, cur
                         )
 
-                    sec_name = ""
-                    if strtab_data and sh_name_idx < len(strtab_data):
-                        end_idx = strtab_data.find(b"\x00", sh_name_idx)
-                        sec_name = strtab_data[sh_name_idx:end_idx if end_idx != -1 else None].decode("ascii", errors="replace")
+                    type_name = p_types.get(p_type, f"0x{p_type:08X}")
+                    r = bool(p_flags & 4)
+                    w = bool(p_flags & 2)
+                    x = bool(p_flags & 1)
 
-                    sec_bytes = self.data[sh_offset:sh_offset + sh_size] if sh_offset + sh_size <= self.length else b""
-                    entropy = self.calculate_entropy(sec_bytes) if sec_bytes else 0.0
+                    if p_type == 0x6474E551:  # PT_GNU_STACK
+                        result["nx_enabled"] = not x
 
-                    result["sections"].append({
-                        "name": sec_name,
-                        "address": hex(sh_addr),
-                        "offset": hex(sh_offset),
-                        "size": sh_size,
-                        "entropy": round(entropy, 2),
-                        "writable": bool(sh_flags & 1),
-                        "alloc": bool(sh_flags & 2),
-                        "executable": bool(sh_flags & 4)
+                    if p_type == 1 and p_filesz > 0 and p_vaddr <= e_entry < p_vaddr + p_filesz:
+                        mapped_entry = p_offset + (e_entry - p_vaddr)
+                        if mapped_entry < self.length:
+                            result["entry_file_offset"] = hex(mapped_entry)
+
+                    result["segments"].append({
+                        "type": type_name,
+                        "offset": hex(p_offset),
+                        "virtual_address": hex(p_vaddr),
+                        "file_size": p_filesz,
+                        "mem_size": p_memsz,
+                        "readable": r,
+                        "writable": w,
+                        "executable": x
                     })
+
+        min_shentsize = 64 if is_64 else 40
+        if e_shoff > 0 and e_shnum > 0:
+            if e_shentsize < min_shentsize:
+                result["warnings"].append(
+                    f"Malformed e_shentsize ({e_shentsize} < {min_shentsize}); skipping section headers"
+                )
+            elif e_shstrndx < e_shnum:
+                str_header_offset = e_shoff + (e_shstrndx * e_shentsize)
+                if str_header_offset + min_shentsize <= self.length and str_header_offset + e_shentsize <= self.length:
+                    if is_64:
+                        _, _, _, _, strtab_offset, strtab_size, _, _, _, _ = struct.unpack_from(
+                            endian_char + "IIQQQQIIQQ", self.data, str_header_offset
+                        )
+                    else:
+                        _, _, _, _, strtab_offset, strtab_size, _, _, _, _ = struct.unpack_from(
+                            endian_char + "IIIIIIIIII", self.data, str_header_offset
+                        )
+                    strtab_data = (
+                        self.data[strtab_offset:strtab_offset + strtab_size]
+                        if strtab_offset + strtab_size <= self.length
+                        else b""
+                    )
+
+                    for i in range(min(e_shnum, 4096)):
+                        cur_sh = e_shoff + (i * e_shentsize)
+                        if cur_sh + min_shentsize > self.length or cur_sh + e_shentsize > self.length:
+                            result["warnings"].append("Truncated ELF section header table")
+                            break
+                        if is_64:
+                            sh_name_idx, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize = struct.unpack_from(
+                                endian_char + "IIQQQQIIQQ", self.data, cur_sh
+                            )
+                        else:
+                            sh_name_idx, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize = struct.unpack_from(
+                                endian_char + "IIIIIIIIII", self.data, cur_sh
+                            )
+
+                        sec_name = ""
+                        if strtab_data and sh_name_idx < len(strtab_data):
+                            end_idx = strtab_data.find(b"\x00", sh_name_idx)
+                            sec_name = strtab_data[sh_name_idx:end_idx if end_idx != -1 else None].decode(
+                                "ascii", errors="replace"
+                            )
+
+                        sec_bytes = (
+                            self.data[sh_offset:sh_offset + sh_size]
+                            if sh_offset + sh_size <= self.length
+                            else b""
+                        )
+                        entropy = self.calculate_entropy(sec_bytes) if sec_bytes else 0.0
+
+                        is_exec = bool(sh_flags & 4)
+                        if result["entry_file_offset"] is None and is_exec and sh_size > 0:
+                            if sh_addr <= e_entry < sh_addr + sh_size:
+                                mapped_off = sh_offset + (e_entry - sh_addr)
+                                if mapped_off < self.length:
+                                    result["entry_file_offset"] = hex(mapped_off)
+
+                        result["sections"].append({
+                            "name": sec_name,
+                            "address": hex(sh_addr),
+                            "virtual_address": hex(sh_addr),
+                            "offset": hex(sh_offset),
+                            "raw_offset": hex(sh_offset),
+                            "size": sh_size,
+                            "raw_size": sh_size,
+                            "entropy": round(entropy, 2),
+                            "writable": bool(sh_flags & 1),
+                            "alloc": bool(sh_flags & 2),
+                            "executable": is_exec
+                        })
 
         return result
 
@@ -171,11 +210,12 @@ class ELFAnalyzer:
     def calculate_entropy(data: bytes) -> float:
         if not data:
             return 0.0
+        sample = data[:16 * 1024 * 1024]
         entropy = 0.0
         counts = [0] * 256
-        for b in data:
+        for b in sample:
             counts[b] += 1
-        total = len(data)
+        total = len(sample)
         for c in counts:
             if c > 0:
                 p = c / total

@@ -1,5 +1,6 @@
 import json
 import os
+import struct
 import subprocess
 from typing import Dict, Any, List, Optional
 
@@ -7,6 +8,7 @@ from reverse_forge.pe_analyzer import PEAnalyzer
 from reverse_forge.elf_analyzer import ELFAnalyzer
 from reverse_forge.macho_analyzer import MachOAnalyzer
 from reverse_forge.tool_installer import ToolchainInstaller
+
 
 class CorrelationEngine:
     """Multi-tool orchestrator combining format parsers, radare2, and capstone disassembly."""
@@ -20,10 +22,16 @@ class CorrelationEngine:
         if len(data) >= 4 and data[:4] == b"\x7fELF":
             return "ELF"
         if len(data) >= 4:
-            import struct
             magic = struct.unpack_from(">I", data, 0)[0]
-            if magic in (0xFEEDFACE, 0xCEFAEDFE, 0xFEEDFACF, 0xCFFAEDFE, 0xCAFEBABE, 0xBEBAFECA):
+            if magic in (0xFEEDFACE, 0xCEFAEDFE, 0xFEEDFACF, 0xCFFAEDFE):
                 return "Mach-O"
+            if magic in (0xCAFEBABE, 0xBEBAFECA):
+                if MachOAnalyzer.is_fat_macho(data):
+                    return "Mach-O"
+                if magic == 0xCAFEBABE and len(data) >= 8:
+                    _, major_ver = struct.unpack_from(">HH", data, 4)
+                    if 45 <= major_ver <= 75:
+                        return "JVM Class"
         return "Unknown"
 
     def analyze_artifact(self, filepath: str) -> Dict[str, Any]:
@@ -42,17 +50,22 @@ class CorrelationEngine:
             format_info = ELFAnalyzer(data).analyze()
         elif fmt == "Mach-O":
             format_info = MachOAnalyzer(data).analyze()
+        elif fmt == "JVM Class":
+            minor_ver, major_ver = struct.unpack_from(">HH", data, 4)
+            format_info = {
+                "format": "JVM Class Bytecode",
+                "architecture": "JVM",
+                "class_version": f"{major_ver}.{minor_ver}",
+                "entropy": PEAnalyzer.calculate_entropy(data),
+            }
         else:
             format_info = {
                 "format": "Unknown/Raw Binary",
                 "entropy": PEAnalyzer.calculate_entropy(data)
             }
 
-        # Run multi-tool combinational inspection
         r2_info = self._run_r2_analysis(filepath)
         capstone_info = self._run_capstone_disassembly(data, format_info)
-
-        # Cross-correlate findings
         correlation = self._correlate_results(format_info, r2_info, capstone_info)
 
         return {
@@ -65,7 +78,7 @@ class CorrelationEngine:
         }
 
     def _run_r2_analysis(self, filepath: str) -> Dict[str, Any]:
-        """Execute radare2 in JSON batch mode if present."""
+        """Execute radare2 in JSON batch mode with function analysis ('aa; iIj; aflj')."""
         tools = self.installer.detect_all()
         r2_meta = tools.get("radare2", {})
 
@@ -74,9 +87,8 @@ class CorrelationEngine:
 
         r2_bin = r2_meta["path"]
         try:
-            # -q = quiet, -c "iIj; aflj" = get binary info JSON and function list JSON
-            cmd = [r2_bin, "-q", "-c", "iIj; aflj", filepath]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            cmd = [r2_bin, "-q", "-c", "aa; iIj; aflj", filepath]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             if proc.returncode == 0:
                 raw_out = proc.stdout.strip().split("\n")
                 info_json = {}
@@ -96,10 +108,48 @@ class CorrelationEngine:
                     "functions_count": len(funcs_json),
                     "functions_sample": funcs_json[:10]
                 }
-            else:
-                return {"status": "error", "stderr": proc.stderr}
+            return {"status": "error", "stderr": proc.stderr}
         except Exception as e:
             return {"status": "error", "exception": str(e)}
+
+    @staticmethod
+    def _resolve_disassembly_slice(data: bytes, format_info: Dict[str, Any]) -> tuple[bytes, int]:
+        """Resolve the accurate file offset and virtual address for entry-point disassembly."""
+        entry_hex = format_info.get("entry_point", 0)
+        try:
+            entry_va = int(entry_hex, 16) if isinstance(entry_hex, str) else int(entry_hex)
+        except Exception:
+            entry_va = 0
+
+        entry_file_off_raw = format_info.get("entry_file_offset")
+        if entry_file_off_raw is not None:
+            try:
+                off = int(entry_file_off_raw, 16) if isinstance(entry_file_off_raw, str) else int(entry_file_off_raw)
+                if 0 <= off < len(data):
+                    return data[off:off + 64], entry_va
+            except Exception:
+                pass
+
+        for sec in format_info.get("sections", []):
+            if not sec.get("executable"):
+                continue
+            off_val = sec.get("raw_offset") or sec.get("offset")
+            vaddr_val = sec.get("virtual_address") or sec.get("address")
+            size_val = sec.get("raw_size") or sec.get("size") or 0
+            try:
+                sec_off = int(off_val, 16) if isinstance(off_val, str) else int(off_val)
+                sec_va = int(vaddr_val, 16) if isinstance(vaddr_val, str) else int(vaddr_val or 0)
+                sec_sz = int(size_val)
+                if entry_va > 0 and sec_sz > 0 and sec_va <= entry_va < sec_va + sec_sz:
+                    mapped = sec_off + (entry_va - sec_va)
+                    if 0 <= mapped < len(data):
+                        return data[mapped:mapped + 64], entry_va
+                if 0 <= sec_off < len(data):
+                    return data[sec_off:sec_off + 64], (sec_va or entry_va)
+            except Exception:
+                continue
+
+        return data[:64], entry_va
 
     def _run_capstone_disassembly(self, data: bytes, format_info: Dict[str, Any]) -> Dict[str, Any]:
         """Disassemble entry point bytes via Capstone if available."""
@@ -109,13 +159,6 @@ class CorrelationEngine:
             return {"status": "skipped", "reason": "Capstone library not installed"}
 
         arch_str = format_info.get("architecture", "")
-        entry_hex = format_info.get("entry_point", "0")
-        try:
-            entry_int = int(entry_hex, 16) if isinstance(entry_hex, str) else int(entry_hex)
-        except Exception:
-            entry_int = 0
-
-        # Map architecture to capstone mode
         cs_arch = capstone.CS_ARCH_X86
         cs_mode = capstone.CS_MODE_64 if ("64" in arch_str or "AMD64" in arch_str) else capstone.CS_MODE_32
 
@@ -128,20 +171,10 @@ class CorrelationEngine:
 
         try:
             md = capstone.Cs(cs_arch, cs_mode)
-            # Find candidate code bytes (around entry offset or beginning of executable section)
-            sample_bytes = data[:512]
-            for sec in format_info.get("sections", []):
-                if sec.get("executable") and "raw_offset" in sec:
-                    try:
-                        off = int(sec["raw_offset"], 16) if isinstance(sec["raw_offset"], str) else sec["raw_offset"]
-                        if off < len(data):
-                            sample_bytes = data[off:off + 64]
-                            break
-                    except Exception:
-                        pass
+            sample_bytes, disasm_addr = self._resolve_disassembly_slice(data, format_info)
 
             instructions = []
-            for instr in md.disasm(sample_bytes, entry_int):
+            for instr in md.disasm(sample_bytes, disasm_addr):
                 instructions.append(f"0x{instr.address:x}:\t{instr.mnemonic}\t{instr.op_str}")
                 if len(instructions) >= 15:
                     break
