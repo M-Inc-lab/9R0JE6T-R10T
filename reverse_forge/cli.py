@@ -10,6 +10,7 @@ from typing import Dict, Any, List
 from reverse_forge.pe_analyzer import PEAnalyzer
 from reverse_forge.elf_analyzer import ELFAnalyzer
 from reverse_forge.macho_analyzer import MachOAnalyzer
+from reverse_forge.ghidra_analyzer import GhidraHeadlessAnalyzer
 from reverse_forge.tool_installer import ToolchainInstaller
 from reverse_forge.correlation_engine import CorrelationEngine
 from reverse_forge.windows_sandbox import WindowsSandbox
@@ -71,6 +72,15 @@ def _require_existing_file(filepath: str) -> None:
         sys.exit(f"Error: Artifact not found: {filepath}")
 
 
+def _write_or_print(res: Dict[str, Any], output_path: str | None, label: str) -> None:
+    if output_path:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(res, f, indent=2)
+        print(f"Success: {label} written to {output_path}")
+    else:
+        print(json.dumps(res, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="R3V3R53//F0RG3 Autonomous Multi-Tool Cross-Platform Reverse Engineering Engine"
@@ -99,6 +109,22 @@ def main():
     str_p.add_argument("--input", "-i", required=True, help="Target binary artifact path")
     str_p.add_argument("--output", "-o", help="Path to write JSON results")
     str_p.add_argument("--min-len", type=int, default=5, help="Minimum string length")
+
+    # elf-audit
+    eaudit_p = subparsers.add_parser("elf-audit", help="Full Linux ELF mitigation, dynamic linking, and symbol audit")
+    eaudit_p.add_argument("--input", "-i", required=True, help="Target ELF binary")
+    eaudit_p.add_argument("--output", "-o", help="Path to write JSON results")
+
+    # macho-audit
+    maudit_p = subparsers.add_parser("macho-audit", help="Full Apple Mach-O mitigation, dylib, symbol, and signing audit")
+    maudit_p.add_argument("--input", "-i", required=True, help="Target Mach-O binary")
+    maudit_p.add_argument("--output", "-o", help="Path to write JSON results")
+
+    # ghidra-audit
+    gaudit_p = subparsers.add_parser("ghidra-audit", help="Headless Ghidra function, sink xref, and decompilation export")
+    gaudit_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    gaudit_p.add_argument("--output", "-o", help="Path to write JSON results")
+    gaudit_p.add_argument("--timeout", type=int, default=120, help="Headless Ghidra timeout in seconds")
 
     # win-checksec
     wsec_p = subparsers.add_parser("win-checksec", help="Inspect Windows security mitigations (ASLR, DEP, CFG, SafeSEH)")
@@ -168,33 +194,40 @@ def main():
             "format": fmt,
             "metadata": meta
         }
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
-                json.dump(res, f, indent=2)
-            print(f"Success: Triage analysis written to {args.output}")
-        else:
-            print(json.dumps(res, indent=2))
+        _write_or_print(res, args.output, "Triage analysis")
 
     elif args.command == "correlate":
         _require_existing_file(args.input)
         engine = CorrelationEngine()
         res = engine.analyze_artifact(args.input)
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
-                json.dump(res, f, indent=2)
-            print(f"Success: Correlated analysis written to {args.output}")
-        else:
-            print(json.dumps(res, indent=2))
+        _write_or_print(res, args.output, "Correlated analysis")
 
     elif args.command == "strings":
         _require_existing_file(args.input)
         res = extract_strings(args.input, min_len=args.min_len)
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
-                json.dump(res, f, indent=2)
-            print(f"Success: Strings extracted to {args.output}")
-        else:
-            print(json.dumps(res, indent=2))
+        _write_or_print(res, args.output, "Strings")
+
+    elif args.command == "elf-audit":
+        _require_existing_file(args.input)
+        with open(args.input, "rb") as f:
+            data = f.read()
+        res = ELFAnalyzer(data).full_audit()
+        res["artifact"] = os.path.abspath(args.input)
+        _write_or_print(res, args.output, "ELF audit")
+
+    elif args.command == "macho-audit":
+        _require_existing_file(args.input)
+        with open(args.input, "rb") as f:
+            data = f.read()
+        res = MachOAnalyzer(data).full_audit()
+        res["artifact"] = os.path.abspath(args.input)
+        _write_or_print(res, args.output, "Mach-O audit")
+
+    elif args.command == "ghidra-audit":
+        _require_existing_file(args.input)
+        ghidra = GhidraHeadlessAnalyzer()
+        res = ghidra.analyze(args.input, timeout=args.timeout)
+        _write_or_print(res, args.output, "Ghidra headless audit")
 
     elif args.command in ("win-checksec", "win-iat", "win-audit"):
         _require_existing_file(args.input)
@@ -209,13 +242,7 @@ def main():
         else:
             res = wengine.full_audit()
             msg = "Windows audit"
-
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
-                json.dump(res, f, indent=2)
-            print(f"Success: {msg} written to {args.output}")
-        else:
-            print(json.dumps(res, indent=2))
+        _write_or_print(res, args.output, msg)
 
     elif args.command == "win-sandbox":
         _require_existing_file(args.input)

@@ -1,14 +1,37 @@
 import math
 import struct
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+
+DANGEROUS_ELF_APIS = {
+    "Banned / Unsafe C Functions": [
+        "strcpy", "strcat", "sprintf", "vsprintf", "gets", "scanf", "sscanf"
+    ],
+    "Command & Process Execution": [
+        "system", "popen", "execve", "execl", "execlp", "execvp", "posix_spawn"
+    ],
+    "Memory & Dynamic Loading": [
+        "dlopen", "dlsym", "mprotect", "mmap", "ptrace"
+    ],
+    "Network & Socket I/O": [
+        "socket", "connect", "bind", "listen", "accept", "recv", "recvfrom"
+    ]
+}
 
 
 class ELFAnalyzer:
-    """Pure-Python ELF32 and ELF64 header, segment, and section analyzer."""
+    """Pure-Python ELF32 and ELF64 header, segment, section, symbol, dynamic linking, and mitigation analyzer."""
 
     def __init__(self, data: bytes):
         self.data = data
         self.length = len(data)
+
+    def _read_cstring(self, blob: bytes, offset: int, max_len: int = 256) -> str:
+        if offset < 0 or offset >= len(blob):
+            return ""
+        end = blob.find(b"\x00", offset, min(len(blob), offset + max_len))
+        if end == -1:
+            end = min(len(blob), offset + max_len)
+        return blob[offset:end].decode("utf-8", errors="replace")
 
     def analyze(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -19,9 +42,17 @@ class ELFAnalyzer:
             "type": "Unknown",
             "entry_point": 0,
             "entry_file_offset": None,
+            "interpreter": None,
             "segments": [],
             "sections": [],
+            "shared_libraries": [],
+            "rpath": None,
+            "runpath": None,
+            "imported_symbols": [],
+            "exported_symbols": [],
+            "suspicious_capabilities": {},
             "nx_enabled": None,
+            "mitigations": {},
             "entropy": self.calculate_entropy(self.data),
             "warnings": []
         }
@@ -84,8 +115,16 @@ class ELFAnalyzer:
         p_types = {
             0: "PT_NULL", 1: "PT_LOAD", 2: "PT_DYNAMIC", 3: "PT_INTERP",
             4: "PT_NOTE", 5: "PT_SHLIB", 6: "PT_PHDR", 7: "PT_TLS",
-            0x6474E551: "PT_GNU_STACK"
+            0x6474E550: "PT_GNU_EH_FRAME",
+            0x6474E551: "PT_GNU_STACK",
+            0x6474E552: "PT_GNU_RELRO",
+            0x6474E553: "PT_GNU_PROPERTY"
         }
+
+        has_gnu_relro = False
+        has_interp = False
+        dyn_seg_offset = 0
+        dyn_seg_size = 0
 
         min_phentsize = 56 if is_64 else 32
         if e_phoff > 0 and e_phnum > 0:
@@ -115,6 +154,15 @@ class ELFAnalyzer:
 
                     if p_type == 0x6474E551:  # PT_GNU_STACK
                         result["nx_enabled"] = not x
+                    elif p_type == 0x6474E552:  # PT_GNU_RELRO
+                        has_gnu_relro = True
+                    elif p_type == 3:  # PT_INTERP
+                        has_interp = True
+                        if p_offset + p_filesz <= self.length and p_filesz > 0:
+                            result["interpreter"] = self._read_cstring(self.data[p_offset:p_offset + p_filesz], 0)
+                    elif p_type == 2:  # PT_DYNAMIC
+                        dyn_seg_offset = p_offset
+                        dyn_seg_size = p_filesz
 
                     if p_type == 1 and p_filesz > 0 and p_vaddr <= e_entry < p_vaddr + p_filesz:
                         mapped_entry = p_offset + (e_entry - p_vaddr)
@@ -132,6 +180,7 @@ class ELFAnalyzer:
                         "executable": x
                     })
 
+        raw_section_headers: List[tuple[str, int, int, int, int, int, int]] = []
         min_shentsize = 64 if is_64 else 40
         if e_shoff > 0 and e_shnum > 0:
             if e_shentsize < min_shentsize:
@@ -169,12 +218,10 @@ class ELFAnalyzer:
                                 endian_char + "IIIIIIIIII", self.data, cur_sh
                             )
 
-                        sec_name = ""
-                        if strtab_data and sh_name_idx < len(strtab_data):
-                            end_idx = strtab_data.find(b"\x00", sh_name_idx)
-                            sec_name = strtab_data[sh_name_idx:end_idx if end_idx != -1 else None].decode(
-                                "ascii", errors="replace"
-                            )
+                        sec_name = self._read_cstring(strtab_data, sh_name_idx) if strtab_data else ""
+                        raw_section_headers.append(
+                            (sec_name, sh_type, sh_offset, sh_size, sh_link, sh_entsize, sh_addr)
+                        )
 
                         sec_bytes = (
                             self.data[sh_offset:sh_offset + sh_size]
@@ -204,7 +251,197 @@ class ELFAnalyzer:
                             "executable": is_exec
                         })
 
+        # Parse .dynsym / .symtab and .dynamic
+        dynstr_blob = b""
+        for sec_name, sh_type, sh_offset, sh_size, _, _, _ in raw_section_headers:
+            if sec_name == ".dynstr" and sh_offset + sh_size <= self.length:
+                dynstr_blob = self.data[sh_offset:sh_offset + sh_size]
+            elif sec_name == ".dynamic" and dyn_seg_offset == 0:
+                dyn_seg_offset = sh_offset
+                dyn_seg_size = sh_size
+
+        bind_now = False
+        pie_flag = False
+        if dyn_seg_offset > 0 and dyn_seg_size > 0 and dyn_seg_offset + dyn_seg_size <= self.length:
+            entry_step = 16 if is_64 else 8
+            dyn_fmt = endian_char + ("qQ" if is_64 else "iI")
+            needed_offsets: List[int] = []
+            rpath_off: Optional[int] = None
+            runpath_off: Optional[int] = None
+
+            for off in range(dyn_seg_offset, dyn_seg_offset + dyn_seg_size - entry_step + 1, entry_step):
+                d_tag, d_val = struct.unpack_from(dyn_fmt, self.data, off)
+                if d_tag == 0:  # DT_NULL
+                    break
+                elif d_tag == 1:  # DT_NEEDED
+                    needed_offsets.append(d_val)
+                elif d_tag == 15:  # DT_RPATH
+                    rpath_off = d_val
+                elif d_tag == 29:  # DT_RUNPATH
+                    runpath_off = d_val
+                elif d_tag == 24:  # DT_BIND_NOW
+                    bind_now = True
+                elif d_tag == 30:  # DT_FLAGS
+                    if d_val & 0x8:  # DF_BIND_NOW
+                        bind_now = True
+                elif d_tag == 0x6FFFFFFB:  # DT_FLAGS_1
+                    if d_val & 0x1:  # DF_1_NOW
+                        bind_now = True
+                    if d_val & 0x8000000:  # DF_1_PIE
+                        pie_flag = True
+
+            if dynstr_blob:
+                result["shared_libraries"] = [
+                    self._read_cstring(dynstr_blob, noff) for noff in needed_offsets if self._read_cstring(dynstr_blob, noff)
+                ]
+                if rpath_off is not None:
+                    result["rpath"] = self._read_cstring(dynstr_blob, rpath_off) or None
+                if runpath_off is not None:
+                    result["runpath"] = self._read_cstring(dynstr_blob, runpath_off) or None
+
+        # Extract symbols from SHT_DYNSYM (11) and SHT_SYMTAB (2)
+        imports_list: List[str] = []
+        exports_list: List[str] = []
+        sym_entry_size = 24 if is_64 else 16
+        for sec_name, sh_type, sh_offset, sh_size, sh_link, _, _ in raw_section_headers:
+            if sh_type not in (2, 11) or sh_offset + sh_size > self.length:
+                continue
+            if sh_link >= len(raw_section_headers):
+                continue
+            _, _, str_off, str_sz, _, _, _ = raw_section_headers[sh_link]
+            if str_off + str_sz > self.length:
+                continue
+            str_blob = self.data[str_off:str_off + str_sz]
+
+            count = min(sh_size // sym_entry_size, 8192)
+            for idx in range(count):
+                s_off = sh_offset + idx * sym_entry_size
+                if s_off + sym_entry_size > self.length:
+                    break
+                if is_64:
+                    st_name, st_info, st_other, st_shndx, st_value, st_size = struct.unpack_from(
+                        endian_char + "IBBHQQ", self.data, s_off
+                    )
+                else:
+                    st_name, st_value, st_size, st_info, st_other, st_shndx = struct.unpack_from(
+                        endian_char + "IIIBBH", self.data, s_off
+                    )
+                if st_name == 0:
+                    continue
+                sname = self._read_cstring(str_blob, st_name)
+                if not sname:
+                    continue
+                base_sym = sname.split("@")[0]
+                st_bind = st_info >> 4
+                st_type = st_info & 0xF
+                if st_shndx == 0:  # SHN_UNDEF -> imported symbol
+                    imports_list.append(base_sym)
+                elif st_bind in (1, 2) and st_type in (1, 2):  # STB_GLOBAL/WEAK FUNC/OBJECT -> exported
+                    exports_list.append(base_sym)
+
+        imports_dedup = list(dict.fromkeys(imports_list))
+        exports_dedup = list(dict.fromkeys(exports_list))
+        result["imported_symbols"] = imports_dedup[:250]
+        result["exported_symbols"] = exports_dedup[:250]
+
+        capabilities: Dict[str, List[str]] = {}
+        for sym in imports_dedup:
+            clean_sym = sym.lstrip("_")
+            for cat, patterns in DANGEROUS_ELF_APIS.items():
+                if sym in patterns or clean_sym in patterns:
+                    capabilities.setdefault(cat, []).append(sym)
+        result["suspicious_capabilities"] = capabilities
+
+        # Compute ELF security mitigations
+        has_canary = any(
+            s in ("__stack_chk_fail", "__stack_chk_guard", "__intel_security_cookie")
+            for s in imports_dedup
+        )
+        has_fortify = any(s.endswith("_chk") and s.startswith("__") for s in imports_dedup)
+        is_pie = (e_type == 3 and (pie_flag or has_interp or e_entry > 0))
+        if has_gnu_relro and bind_now:
+            relro_mode = "Full RELRO"
+        elif has_gnu_relro:
+            relro_mode = "Partial RELRO"
+        else:
+            relro_mode = "No RELRO"
+
+        result["mitigations"] = {
+            "nx": bool(result["nx_enabled"]),
+            "pie": is_pie,
+            "relro": relro_mode,
+            "stack_canary": has_canary,
+            "fortify_source": has_fortify,
+            "rpath": result["rpath"],
+            "runpath": result["runpath"],
+        }
+
         return result
+
+    def full_audit(self) -> Dict[str, Any]:
+        """Generate comprehensive ELF security mitigation and capability audit report."""
+        analysis = self.analyze()
+        mitigations = analysis.get("mitigations", {})
+        caps = analysis.get("suspicious_capabilities", {})
+        vulnerabilities = []
+
+        if analysis.get("is_elf"):
+            if not mitigations.get("nx"):
+                vulnerabilities.append({
+                    "id": "ELF-VULN-01",
+                    "title": "Executable Stack / Missing NX (PT_GNU_STACK)",
+                    "severity": "HIGH",
+                    "cwe": "CWE-119",
+                    "description": "Binary lacks non-executable PT_GNU_STACK protection, allowing stack memory execution.",
+                })
+            if not mitigations.get("pie") and "ET_EXEC" in analysis.get("type", ""):
+                vulnerabilities.append({
+                    "id": "ELF-VULN-02",
+                    "title": "Non-PIE Executable (Static Base Address)",
+                    "severity": "MEDIUM",
+                    "cwe": "CWE-119",
+                    "description": "Executable is compiled as ET_EXEC rather than Position-Independent Executable (ET_DYN/PIE), weakening ASLR.",
+                })
+            if mitigations.get("relro") == "No RELRO":
+                vulnerabilities.append({
+                    "id": "ELF-VULN-03",
+                    "title": "Missing Relocation Read-Only (RELRO)",
+                    "severity": "MEDIUM",
+                    "cwe": "CWE-119",
+                    "description": "Global Offset Table (.got/.got.plt) remains writable at runtime.",
+                })
+            rpath_val = mitigations.get("rpath") or mitigations.get("runpath")
+            if rpath_val and any(tok in rpath_val for tok in ("$ORIGIN", ".", "/tmp", "/var/tmp")):
+                vulnerabilities.append({
+                    "id": "ELF-VULN-04",
+                    "title": "Potentially Unsafe RPATH/RUNPATH Search Path",
+                    "severity": "HIGH",
+                    "cwe": "CWE-426",
+                    "description": f"Dynamic loader search path contains relative or temporary directory: {rpath_val}",
+                })
+            if "Banned / Unsafe C Functions" in caps:
+                vulnerabilities.append({
+                    "id": "ELF-VULN-05",
+                    "title": "Use of Banned Unbounded Memory/String Functions",
+                    "severity": "HIGH",
+                    "cwe": "CWE-120",
+                    "description": f"Binary imports unbounded C functions: {caps['Banned / Unsafe C Functions']}",
+                })
+
+        return {
+            "is_elf": analysis.get("is_elf"),
+            "architecture": analysis.get("architecture"),
+            "type": analysis.get("type"),
+            "entry_point": analysis.get("entry_point"),
+            "entry_file_offset": analysis.get("entry_file_offset"),
+            "interpreter": analysis.get("interpreter"),
+            "mitigations": mitigations,
+            "shared_libraries": analysis.get("shared_libraries", []),
+            "imported_symbols_count": len(analysis.get("imported_symbols", [])),
+            "exported_symbols_count": len(analysis.get("exported_symbols", [])),
+            "flagged_capabilities": caps,
+            "identified_vulnerabilities": vulnerabilities,
+        }
 
     @staticmethod
     def calculate_entropy(data: bytes) -> float:

@@ -7,14 +7,16 @@ from typing import Dict, Any, List, Optional
 from reverse_forge.pe_analyzer import PEAnalyzer
 from reverse_forge.elf_analyzer import ELFAnalyzer
 from reverse_forge.macho_analyzer import MachOAnalyzer
+from reverse_forge.ghidra_analyzer import GhidraHeadlessAnalyzer
 from reverse_forge.tool_installer import ToolchainInstaller
 
 
 class CorrelationEngine:
-    """Multi-tool orchestrator combining format parsers, radare2, and capstone disassembly."""
+    """Multi-tool orchestrator combining format parsers, radare2, Ghidra headless, and Capstone disassembly."""
 
     def __init__(self):
         self.installer = ToolchainInstaller()
+        self.ghidra = GhidraHeadlessAnalyzer()
 
     def identify_format(self, data: bytes) -> str:
         if len(data) >= 2 and data[:2] == b"MZ":
@@ -34,7 +36,7 @@ class CorrelationEngine:
                         return "JVM Class"
         return "Unknown"
 
-    def analyze_artifact(self, filepath: str) -> Dict[str, Any]:
+    def analyze_artifact(self, filepath: str, run_ghidra: bool = True) -> Dict[str, Any]:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Artifact not found: {filepath}")
 
@@ -65,14 +67,16 @@ class CorrelationEngine:
             }
 
         r2_info = self._run_r2_analysis(filepath)
+        ghidra_info = self.ghidra.analyze(filepath) if run_ghidra else {"status": "skipped", "reason": "Disabled by caller"}
         capstone_info = self._run_capstone_disassembly(data, format_info)
-        correlation = self._correlate_results(format_info, r2_info, capstone_info)
+        correlation = self._correlate_results(format_info, r2_info, ghidra_info, capstone_info)
 
         return {
             "artifact": os.path.abspath(filepath),
             "detected_format": fmt,
             "structural_analysis": format_info,
             "tool_radare2": r2_info,
+            "tool_ghidra": ghidra_info,
             "tool_capstone": capstone_info,
             "correlation_summary": correlation
         }
@@ -186,21 +190,39 @@ class CorrelationEngine:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    def _correlate_results(self, fmt_info: Dict[str, Any], r2_info: Dict[str, Any], cs_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Correlate independently acquired tool outputs."""
+    def _correlate_results(
+        self,
+        fmt_info: Dict[str, Any],
+        r2_info: Dict[str, Any],
+        ghidra_info: Dict[str, Any],
+        cs_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Correlate independently acquired tool outputs across Native Parser, Radare2, Ghidra, and Capstone."""
         evidence = []
         conflicts = []
 
         arch_primary = fmt_info.get("architecture", "Unknown")
         r2_arch = r2_info.get("binary_info", {}).get("arch", None)
+        ghidra_lang = ghidra_info.get("analysis", {}).get("language_id", None)
 
         if r2_arch:
             if r2_arch.lower() in arch_primary.lower() or arch_primary.lower() in r2_arch.lower():
-                evidence.append(f"Architecture confirmed independently by Native Parser and Radare2: {arch_primary}")
+                evidence.append(f"Architecture confirmed by Native Parser and Radare2: {arch_primary}")
             else:
                 conflicts.append(f"Architecture mismatch: Native={arch_primary} vs Radare2={r2_arch}")
         else:
             evidence.append(f"Architecture inferred by Native Parser: {arch_primary}")
+
+        if ghidra_lang:
+            evidence.append(f"Ghidra headless analysis completed with language ID: {ghidra_lang}")
+            sink_xrefs = ghidra_info.get("analysis", {}).get("dangerous_sink_xrefs", [])
+            if sink_xrefs:
+                evidence.append(f"Ghidra identified {len(sink_xrefs)} dangerous sink cross-reference(s)")
+
+        if cs_info.get("status") == "success" and cs_info.get("disassembled_instructions"):
+            evidence.append(
+                f"Capstone disassembled {len(cs_info['disassembled_instructions'])} entry-point instructions"
+            )
 
         entropy = fmt_info.get("entropy", 0.0)
         packed = entropy > 7.1
