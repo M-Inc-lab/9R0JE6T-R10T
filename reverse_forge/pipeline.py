@@ -1,3 +1,4 @@
+import re
 """
 R3V3R53//F0RG3 — 12-Stage Pipeline State Machine & Autonomy Coordinator (§03.2, §16, §17)
 Coordinates Stage 0–11 autonomous progression, Human-In-the-Loop (HIL) gates, and anti-loop guards.
@@ -412,11 +413,18 @@ class PipelineStateMachine:
         wsb_profile = os.path.join(self.provenance_mgr.workspace_root, "detonation_profile.wsb")
         wsb.generate_wsb_profile(wsb_profile)
         
-        # Staging automated telemetry collector script
+        # Staging automated telemetry collector script & Frida DBI hook script
         ps1_collector = os.path.join(self.provenance_mgr.workspace_root, "collect_telemetry.ps1")
         WindowsSandbox.generate_telemetry_collector_script(ps1_collector, self.provenance.artifact_name)
 
-        summary = f"Generated sandbox profile and automated telemetry collector script at {wsb_profile}"
+        from reverse_forge.frida_dbi_engine import FridaDBIEngine
+        frida_js = os.path.join(self.provenance_mgr.workspace_root, "frida_telemetry.js")
+        hook_syms = [s for s in self.static_metadata.get("imported_symbols", [])[:15] if re.match(r"^[A-Za-z0-9_]+$", str(s))]
+        if not hook_syms:
+            hook_syms = ["main", "recv", "strcpy"]
+        FridaDBIEngine.write_frida_script(frida_js, hook_syms)
+
+        summary = f"Generated sandbox profile, PowerShell trace collector, and Frida DBI script ({len(hook_syms)} hooks)"
         self._mark_stage(7, StageStatus.COMPLETED, summary=summary)
         return True
 

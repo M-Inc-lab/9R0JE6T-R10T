@@ -203,6 +203,19 @@ def main():
     sem_p.add_argument("--code-file", required=True, help="Path to decompiled C pseudocode file")
     sem_p.add_argument("--output", "-o", help="Path to write recovered symbol JSON")
 
+    # smt-solve (SMT constraint & guard completeness verification)
+    smt_p = subparsers.add_parser("smt-solve", help="Solve symbolic path constraints and verify buffer guard completeness")
+    smt_p.add_argument("--constraints-json", required=True, help="Path to JSON list of PathConstraint objects")
+    smt_p.add_argument("--length-var", help="Optional length variable name to check against buffer capacity")
+    smt_p.add_argument("--buffer-cap", type=int, default=64, help="Buffer capacity in bytes for guard check")
+    smt_p.add_argument("--output", "-o", help="Path to write SMT result JSON")
+
+    # frida-gen (Read-only Frida DBI telemetry script generator)
+    frida_p = subparsers.add_parser("frida-gen", help="Generate read-only Frida Interceptor.attach telemetry script")
+    frida_p.add_argument("--symbols", required=True, help="Comma-separated list of function names or hex addresses")
+    frida_p.add_argument("--module", default=None, help="Optional target module/DLL/shared-object name")
+    frida_p.add_argument("--output", "-o", default="frida_telemetry.js", help="Output .js script path")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -467,6 +480,28 @@ def main():
         rec_engine = SemanticRecoveryEngine()
         recovered = rec_engine.recover_from_pseudocode(args.function, code_text)
         _write_or_print(asdict(recovered), args.output, "Semantic Symbol & Struct Recovery")
+
+    elif args.command == "smt-solve":
+        _require_existing_file(args.constraints_json)
+        from dataclasses import asdict
+        from reverse_forge.smt_solver_engine import SMTSolverEngine, PathConstraint
+        with open(args.constraints_json, "r", encoding="utf-8") as f:
+            raw_c = json.load(f)
+        constraints = [PathConstraint(**item) for item in raw_c]
+        solver = SMTSolverEngine()
+        solve_res = solver.solve_constraints(constraints)
+        out_payload: Dict[str, Any] = {"feasibility": asdict(solve_res)}
+        if args.length_var:
+            out_payload["guard_verification"] = solver.verify_guard_completeness(
+                constraints, args.length_var, args.buffer_cap
+            )
+        _write_or_print(out_payload, args.output, "SMT Path & Guard Verification")
+
+    elif args.command == "frida-gen":
+        from reverse_forge.frida_dbi_engine import FridaDBIEngine
+        sym_list = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        out_js = FridaDBIEngine.write_frida_script(args.output, sym_list, module_name=args.module)
+        print(f"[+] Frida DBI telemetry script generated: {out_js}")
 
 
 if __name__ == "__main__":
