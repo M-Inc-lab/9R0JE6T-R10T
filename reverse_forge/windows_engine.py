@@ -207,6 +207,20 @@ class WindowsEngine:
             self.pe = None
             self._pure_pe = _PurePEParser(self.filepath)
 
+    def close(self) -> None:
+        """Close underlying file handles if pefile opened the file directly."""
+        if self.pe is not None:
+            try:
+                self.pe.close()
+            except Exception:
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
     def check_mitigations(self) -> Dict[str, Any]:
         """Check Windows compile-time security mitigations (ASLR, DEP, CFG, etc.)."""
         if self.pe is not None:

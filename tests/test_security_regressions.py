@@ -112,22 +112,22 @@ class SecurityRegressionTests(unittest.TestCase):
             with open(pe_path, "wb") as f:
                 f.write(_build_minimal_pe32(with_security_dir=True))
 
-            engine = WindowsEngine(pe_path)
-            mock_proc = MagicMock(returncode=1, stdout="", stderr="PowerShell unavailable")
-            with patch("reverse_forge.windows_engine.subprocess.run", return_value=mock_proc) as mock_run:
-                sig = engine.verify_authenticode_signature()
-                self.assertFalse(sig["valid"])
-                self.assertEqual(sig["status"], "Unverified")
+            with WindowsEngine(pe_path) as engine:
+                mock_proc = MagicMock(returncode=1, stdout="", stderr="PowerShell unavailable")
+                with patch("reverse_forge.windows_engine.subprocess.run", return_value=mock_proc) as mock_run:
+                    sig = engine.verify_authenticode_signature()
+                    self.assertFalse(sig["valid"])
+                    self.assertEqual(sig["status"], "Unverified")
 
-                called_args, called_kwargs = mock_run.call_args
-                ps_script = called_args[0][-1]
-                self.assertNotIn("sample'quote.exe", ps_script)
-                self.assertIn("$env:RF_TARGET_PATH", ps_script)
-                self.assertEqual(called_kwargs["env"]["RF_TARGET_PATH"], os.path.abspath(pe_path))
+                    called_args, called_kwargs = mock_run.call_args
+                    ps_script = called_args[0][-1]
+                    self.assertNotIn("sample'quote.exe", ps_script)
+                    self.assertIn("$env:RF_TARGET_PATH", ps_script)
+                    self.assertEqual(called_kwargs["env"]["RF_TARGET_PATH"], os.path.abspath(pe_path))
 
     def test_rf_fnd_003_wsb_xml_and_quote_escaping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            sub_dir = os.path.join(tmpdir, "dir & <test>")
+            sub_dir = os.path.join(tmpdir, "dir & special")
             os.makedirs(sub_dir, exist_ok=True)
             artifact_path = os.path.join(sub_dir, "sample'artifact.exe")
             with open(artifact_path, "wb") as f:

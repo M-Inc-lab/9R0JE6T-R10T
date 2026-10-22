@@ -146,6 +146,13 @@ def main():
     wsbox_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
     wsbox_p.add_argument("--output", "-o", default="sandbox_profile.wsb", help="Output .wsb profile path")
 
+    # pipeline (12-stage state machine)
+    pipe_p = subparsers.add_parser("pipeline", help="Execute 12-stage autonomous reverse engineering pipeline")
+    pipe_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    pipe_p.add_argument("--autonomy", choices=["0", "1", "2", "3", "4"], default="2", help="Autonomy level (0=Manual, 2=Supervised, 3=Autonomous)")
+    pipe_p.add_argument("--output-json", help="Path to write final report JSON")
+    pipe_p.add_argument("--output-md", help="Path to write final report Markdown")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -249,6 +256,30 @@ def main():
         wsb = WindowsSandbox(args.input)
         out = wsb.generate_wsb_profile(args.output)
         print(f"[+] Windows Sandbox profile generated: {out}")
+
+    elif args.command == "pipeline":
+        _require_existing_file(args.input)
+        from reverse_forge.pipeline import PipelineStateMachine, AutonomyLevel
+        autonomy = AutonomyLevel(int(args.autonomy))
+        sm = PipelineStateMachine(args.input, autonomy_level=autonomy)
+        print(f"[*] Starting 12-stage R3V3R53//F0RG3 pipeline on {args.input} (Autonomy Level: {autonomy.name})...")
+        res = sm.run_all()
+        for st in res["stages"]:
+            status_symbol = "[+]" if st["status"] == "COMPLETED" else "[-]"
+            print(f"  {status_symbol} Stage {st['stage']}: {st['name']} -> {st['status']} ({st['summary']})")
+
+        if args.output_json:
+            with open(args.output_json, "w", encoding="utf-8") as f:
+                json.dump(res["report_json"], f, indent=2)
+            print(f"[+] JSON report saved to {args.output_json}")
+
+        if args.output_md:
+            with open(args.output_md, "w", encoding="utf-8") as f:
+                f.write(res["report_markdown"])
+            print(f"[+] Markdown report saved to {args.output_md}")
+
+        if not args.output_json and not args.output_md:
+            print("\n" + res["report_markdown"])
 
 
 if __name__ == "__main__":
