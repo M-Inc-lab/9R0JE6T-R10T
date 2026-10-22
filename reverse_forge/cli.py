@@ -11,6 +11,8 @@ from reverse_forge.elf_analyzer import ELFAnalyzer
 from reverse_forge.macho_analyzer import MachOAnalyzer
 from reverse_forge.tool_installer import ToolchainInstaller
 from reverse_forge.correlation_engine import CorrelationEngine
+from reverse_forge.windows_engine import WindowsEngine
+from reverse_forge.windows_sandbox import WindowsSandbox
 
 def hash_file(filepath: str) -> Dict[str, str]:
     sha256 = hashlib.sha256()
@@ -69,7 +71,7 @@ def main():
     boot_p = subparsers.add_parser("bootstrap", help="Automatically download and install required analysis tools")
     boot_p.add_argument("--tool", choices=["r2", "capstone", "all"], default="all", help="Tool to provision")
 
-    # inspect / triage
+    # triage
     triage_p = subparsers.add_parser("triage", help="Perform cross-platform format triage (PE, ELF, Mach-O)")
     triage_p.add_argument("--input", "-i", required=True, help="Target binary artifact path")
     triage_p.add_argument("--output", "-o", help="Path to write JSON results")
@@ -84,6 +86,26 @@ def main():
     str_p.add_argument("--input", "-i", required=True, help="Target binary artifact path")
     str_p.add_argument("--output", "-o", help="Path to write JSON results")
     str_p.add_argument("--min-len", type=int, default=5, help="Minimum string length")
+
+    # win-checksec
+    wsec_p = subparsers.add_parser("win-checksec", help="Inspect Windows security mitigations (ASLR, DEP, CFG, SafeSEH)")
+    wsec_p.add_argument("--input", "-i", required=True, help="Target Windows PE binary")
+    wsec_p.add_argument("--output", "-o", help="Path to write JSON results")
+
+    # win-iat
+    wiat_p = subparsers.add_parser("win-iat", help="Analyze Windows Import Address Table and dangerous API capabilities")
+    wiat_p.add_argument("--input", "-i", required=True, help="Target Windows PE binary")
+    wiat_p.add_argument("--output", "-o", help="Path to write JSON results")
+
+    # win-audit
+    waudit_p = subparsers.add_parser("win-audit", help="Full 12-stage Windows PE vulnerability audit")
+    waudit_p.add_argument("--input", "-i", required=True, help="Target Windows PE binary")
+    waudit_p.add_argument("--output", "-o", help="Path to write JSON results")
+
+    # win-sandbox
+    wsbox_p = subparsers.add_parser("win-sandbox", help="Generate Windows Sandbox (.wsb) isolated detonation profile")
+    wsbox_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    wsbox_p.add_argument("--output", "-o", default="sandbox_profile.wsb", help="Output .wsb profile path")
 
     args = parser.parse_args()
     installer = ToolchainInstaller()
@@ -151,6 +173,41 @@ def main():
             print(f"Success: Strings extracted to {args.output}")
         else:
             print(json.dumps(res, indent=2))
+
+    elif args.command == "win-checksec":
+        wengine = WindowsEngine(args.input)
+        res = wengine.check_mitigations()
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(res, f, indent=2)
+            print(f"Success: Checksec written to {args.output}")
+        else:
+            print(json.dumps(res, indent=2))
+
+    elif args.command == "win-iat":
+        wengine = WindowsEngine(args.input)
+        res = wengine.inspect_iat()
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(res, f, indent=2)
+            print(f"Success: IAT analysis written to {args.output}")
+        else:
+            print(json.dumps(res, indent=2))
+
+    elif args.command == "win-audit":
+        wengine = WindowsEngine(args.input)
+        res = wengine.full_audit()
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(res, f, indent=2)
+            print(f"Success: Windows audit written to {args.output}")
+        else:
+            print(json.dumps(res, indent=2))
+
+    elif args.command == "win-sandbox":
+        wsb = WindowsSandbox(args.input)
+        out = wsb.generate_wsb_profile(args.output)
+        print(f"[+] Windows Sandbox profile generated: {out}")
 
 if __name__ == "__main__":
     main()
