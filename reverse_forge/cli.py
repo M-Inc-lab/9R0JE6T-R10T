@@ -164,6 +164,11 @@ def main():
     unpack_p.add_argument("--input", "-i", required=True, help="Target archive/firmware/binary artifact")
     unpack_p.add_argument("--output", "-o", help="Path to write JSON inspection results")
 
+    # dataflow (source-to-sink taint analysis)
+    df_p = subparsers.add_parser("dataflow", help="Trace source-to-sink reachability paths and hazardous memory flows")
+    df_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    df_p.add_argument("--output", "-o", help="Path to write JSON dataflow results")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -327,6 +332,37 @@ def main():
             "java_archive": jar_info,
         }
         _write_or_print(res, args.output, "Container & Layer Inspection")
+
+    elif args.command == "dataflow":
+        _require_existing_file(args.input)
+        from reverse_forge.dataflow_engine import DataFlowGraph
+        from reverse_forge.ghidra_analyzer import GhidraHeadlessAnalyzer
+        ghidra = GhidraHeadlessAnalyzer()
+        g_res = ghidra.analyze(args.input, timeout=60)
+
+        dfg = DataFlowGraph()
+        sinks = g_res.get("sink_xrefs", {})
+        if sinks:
+            dfg.build_from_xrefs(sinks)
+
+        flows = dfg.analyze_source_to_sink_flows()
+        res = {
+            "artifact": os.path.abspath(args.input),
+            "total_call_edges": len(dfg.call_edges),
+            "total_functions_mapped": len(dfg.functions),
+            "discovered_taint_paths": [
+                {
+                    "source": f.source_name,
+                    "sink": f.sink_name,
+                    "path": f.intermediate_nodes,
+                    "confidence": f.path_confidence,
+                    "cwe": f.cwe,
+                    "description": f.description
+                }
+                for f in flows
+            ]
+        }
+        _write_or_print(res, args.output, "Data-Flow & Taint Analysis")
 
 
 if __name__ == "__main__":

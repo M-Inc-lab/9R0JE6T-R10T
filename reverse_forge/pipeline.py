@@ -236,11 +236,45 @@ class PipelineStateMachine:
 
     # Stage 5: Data-Flow & Input-Control Analysis
     def _stage_5(self) -> bool:
-        # Attempt headless Ghidra extraction if available
+        # 1. Attempt headless Ghidra extraction if available
         ghidra = GhidraHeadlessAnalyzer()
         self.ghidra_results = ghidra.analyze(self.provenance.working_copy_path, timeout=60)
         decomp_count = len(self.ghidra_results.get("decompiled_functions", {}))
-        summary = f"Ghidra status: {self.ghidra_results.get('status')}. Decompiled functions: {decomp_count}"
+
+        # 2. Build Call-Graph & Taint Flow analysis
+        from reverse_forge.dataflow_engine import DataFlowGraph
+        dfg = DataFlowGraph()
+        sinks = self.ghidra_results.get("sink_xrefs", {})
+        if sinks:
+            dfg.build_from_xrefs(sinks)
+
+        # Also add imports/exports relationships if present
+        imports = self.static_metadata.get("imports", [])
+        for imp in imports:
+            func = imp.get("function") or imp.get("name")
+            if func:
+                dfg.add_edge("main", str(func))
+
+        flows = dfg.analyze_source_to_sink_flows()
+        for flow in flows:
+            self.report_generator.add_finding(Finding(
+                finding_id=f"TAINT-{flow.sink_name.upper()}",
+                title=f"Source-to-Sink Taint Path: {flow.source_name} -> {flow.sink_name}",
+                vulnerability_class="Untrusted Data Flow & Memory Taint",
+                confidence=flow.path_confidence,
+                cvss_score=8.5,
+                cwe_id=flow.cwe,
+                function_symbol=" -> ".join(flow.intermediate_nodes),
+                address_or_offset="CallGraph Edge",
+                what=flow.description,
+                why="Untrusted input flows directly or transitively into hazardous sink.",
+                where=f"Path nodes: {flow.intermediate_nodes}",
+                when="Processing external untrusted input stream",
+                how="Payload reaches sink parameter without sanitization or bounds check.",
+                remediation=f"Sanitize data from `{flow.source_name}` before invoking `{flow.sink_name}`."
+            ))
+
+        summary = f"Ghidra status: {self.ghidra_results.get('status')}. Decompiled: {decomp_count}. Taint paths: {len(flows)}"
         self._mark_stage(5, StageStatus.COMPLETED, summary=summary)
         return True
 
