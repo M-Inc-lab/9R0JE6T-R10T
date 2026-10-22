@@ -326,7 +326,53 @@ class PipelineStateMachine:
                     remediation="Compile with `-z noexecstack`."
                 ))
 
-        summary = f"Security mitigation audit completed for {self.format_name}"
+        # Cryptographic algorithms & embedded secrets scan
+        from reverse_forge.crypto_engine import CryptoSecretEngine
+        crypto_engine = CryptoSecretEngine()
+        crypto_audit = crypto_engine.full_crypto_audit(self.binary_bytes)
+
+        for sec in crypto_audit.get("secrets_detected", []):
+            self.report_generator.add_finding(Finding(
+                finding_id=f"SECRET-{sec['secret_type']}",
+                title=f"Hardcoded Cryptographic Secret / Credential: {sec['secret_type']}",
+                vulnerability_class="Hardcoded Credentials & Cryptographic Exposure",
+                confidence=sec["confidence"],
+                cvss_score=8.6,
+                cwe_id="CWE-798",
+                function_symbol="Embedded Constant",
+                address_or_offset=hex(sec["offset"]),
+                what=f"Hardcoded credential or key detected (masked: {sec['matched_value_masked']}, entropy: {sec['entropy']}).",
+                why=sec["description"],
+                where="Binary data segment / read-only rodata",
+                when="Static binary inspection or runtime credential extraction",
+                how="Adversary extracts hardcoded key directly from binary string table.",
+                remediation="Store secrets externally in a secure vault (KMS / HashiCorp Vault / DPAPI)."
+            ))
+
+        for prim in crypto_audit.get("primitives_detected", []):
+            if "Weak" in prim["algorithm_family"]:
+                self.report_generator.add_finding(Finding(
+                    finding_id=f"CRYPTO-WEAK-{prim['primitive_name']}",
+                    title=f"Deprecated / Collision-Prone Hash Algorithm: {prim['primitive_name']}",
+                    vulnerability_class="Broken / Risky Cryptographic Algorithm",
+                    confidence=prim["confidence"],
+                    cvss_score=6.5,
+                    cwe_id="CWE-328",
+                    function_symbol="Cryptographic Constant Table",
+                    address_or_offset=hex(prim["offset"]),
+                    what=prim["description"],
+                    why="Algorithm is mathematically broken and vulnerable to practical hash collision attacks.",
+                    where="Binary initialization block",
+                    when="Verifying cryptographic signatures or data integrity",
+                    how="Adversary crafts colliding payload matching expected digest.",
+                    remediation="Upgrade to SHA-256, SHA-3, or Argon2id."
+                ))
+
+        summary = (
+            f"Security mitigation audit completed for {self.format_name}. "
+            f"Crypto status: {crypto_audit['crypto_hygiene_status']} "
+            f"(Secrets: {crypto_audit['high_risk_secrets_count']}, Weak Algos: {crypto_audit['weak_algorithms_count']})"
+        )
         self._mark_stage(6, StageStatus.COMPLETED, summary=summary)
         return True
 

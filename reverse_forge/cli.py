@@ -169,6 +169,11 @@ def main():
     df_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
     df_p.add_argument("--output", "-o", help="Path to write JSON dataflow results")
 
+    # crypto-audit (cryptographic primitives & hardcoded secrets)
+    crypto_p = subparsers.add_parser("crypto-audit", help="Audit cryptographic constant tables and discover hardcoded secrets")
+    crypto_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    crypto_p.add_argument("--output", "-o", help="Path to write JSON crypto audit results")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -363,6 +368,17 @@ def main():
             ]
         }
         _write_or_print(res, args.output, "Data-Flow & Taint Analysis")
+
+    elif args.command == "crypto-audit":
+        _require_existing_file(args.input)
+        from reverse_forge.crypto_engine import CryptoSecretEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+
+        c_engine = CryptoSecretEngine()
+        audit = c_engine.full_crypto_audit(data)
+        audit["artifact"] = os.path.abspath(args.input)
+        _write_or_print(audit, args.output, "Crypto & Secret Audit")
 
 
 if __name__ == "__main__":
