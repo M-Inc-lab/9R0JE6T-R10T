@@ -159,6 +159,11 @@ def main():
     behav_p.add_argument("--binary", "-b", help="Path to analyzed binary for static cross-reference")
     behav_p.add_argument("--output", "-o", help="Path to write correlation JSON output")
 
+    # unpack (multi-layer container extraction)
+    unpack_p = subparsers.add_parser("unpack", help="Inspect and extract embedded container layers, .NET headers, or JARs")
+    unpack_p.add_argument("--input", "-i", required=True, help="Target archive/firmware/binary artifact")
+    unpack_p.add_argument("--output", "-o", help="Path to write JSON inspection results")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -301,6 +306,27 @@ def main():
         matches = b_engine.correlate_with_static_analysis(static_ctx)
         summary = b_engine.generate_behavioral_summary()
         _write_or_print(summary, args.output, "Behavioral Correlation")
+
+    elif args.command == "unpack":
+        _require_existing_file(args.input)
+        from reverse_forge.layer_unpacker import LayerUnpacker
+        with open(args.input, "rb") as f:
+            data = f.read()
+
+        containers = LayerUnpacker.identify_embedded_containers(data)
+        dotnet_info = LayerUnpacker.inspect_dotnet_metadata(data)
+        fat_slices = LayerUnpacker.parse_macho_fat_slices(data)
+        jar_info = LayerUnpacker.inspect_java_archive(args.input) if zipfile.is_zipfile(args.input) else {}
+
+        res = {
+            "artifact": os.path.abspath(args.input),
+            "size_bytes": len(data),
+            "dotnet": dotnet_info,
+            "embedded_containers": [{"type": c[0], "offset": c[1], "size": c[2]} for c in containers],
+            "macho_fat_slices": fat_slices,
+            "java_archive": jar_info,
+        }
+        _write_or_print(res, args.output, "Container & Layer Inspection")
 
 
 if __name__ == "__main__":

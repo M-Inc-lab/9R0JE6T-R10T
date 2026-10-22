@@ -187,11 +187,26 @@ class PipelineStateMachine:
     def _stage_2(self) -> bool:
         entropy = PEAnalyzer.calculate_entropy(self.binary_bytes)
         packed = entropy > 7.2
-        summary = f"Entropy: {entropy:.2f}. Wrapper/Packer suspicion: {packed}"
+        
+        from reverse_forge.layer_unpacker import LayerUnpacker
+        containers = LayerUnpacker.identify_embedded_containers(self.binary_bytes)
+        dotnet_info = LayerUnpacker.inspect_dotnet_metadata(self.binary_bytes)
+        fat_slices = LayerUnpacker.parse_macho_fat_slices(self.binary_bytes)
+
+        summary_parts = [f"Entropy: {entropy:.2f}"]
         if packed:
+            summary_parts.append("Suspicious High Entropy (Packer)")
             self.report_generator.add_non_finding(
                 f"High entropy ({entropy:.2f}) observed in Stage 2 indicates possible compression/packing."
             )
+        if dotnet_info.get("is_dotnet"):
+            summary_parts.append(".NET Assembly Detected")
+        if containers:
+            summary_parts.append(f"Embedded Containers: {len(containers)}")
+        if fat_slices:
+            summary_parts.append(f"Universal Fat Slices: {len(fat_slices)}")
+
+        summary = ". ".join(summary_parts)
         self._mark_stage(2, StageStatus.COMPLETED, summary=summary)
         return True
 
