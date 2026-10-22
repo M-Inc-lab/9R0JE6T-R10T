@@ -174,6 +174,12 @@ def main():
     crypto_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
     crypto_p.add_argument("--output", "-o", help="Path to write JSON crypto audit results")
 
+    # remediate (defensive patch & regression test generator)
+    rem_p = subparsers.add_parser("remediate", help="Synthesize defensive code patch and regression unit test for a CWE")
+    rem_p.add_argument("--cwe", required=True, help="Target CWE identifier (e.g. CWE-120, CWE-78, CWE-134, CWE-798)")
+    rem_p.add_argument("--symbol", default="main", help="Target function symbol name")
+    rem_p.add_argument("--output", "-o", help="Path to write JSON remediation payload")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -379,6 +385,21 @@ def main():
         audit = c_engine.full_crypto_audit(data)
         audit["artifact"] = os.path.abspath(args.input)
         _write_or_print(audit, args.output, "Crypto & Secret Audit")
+
+    elif args.command == "remediate":
+        from reverse_forge.remediation_engine import RemediationEngine
+        from dataclasses import asdict
+        rem = RemediationEngine()
+        patch = rem.generate_defensive_patch(f"VULN-{args.cwe}", args.cwe, args.symbol)
+        harness = rem.generate_regression_test_harness(args.symbol, args.cwe)
+
+        res = {
+            "cwe_id": args.cwe,
+            "target_symbol": args.symbol,
+            "defensive_patch": asdict(patch),
+            "regression_harness": asdict(harness)
+        }
+        _write_or_print(res, args.output, "Defensive Remediation Synthesis")
 
 
 if __name__ == "__main__":
