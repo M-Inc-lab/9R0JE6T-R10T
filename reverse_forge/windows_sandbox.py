@@ -47,9 +47,10 @@ class WindowsSandbox:
     @staticmethod
     def generate_telemetry_collector_script(output_ps1_path: str, target_name: str, duration_sec: int = 30) -> str:
         """Create a standalone PowerShell script to monitor and output telemetry JSON."""
+        safe_target = target_name.replace("\\r", "").replace("\\n", "").replace("'", "''")
         ps_script = f"""# R3V3R53//F0RG3 Automated Behavioral Telemetry Collector
-$target = "{target_name}"
-$logPath = "C:\\Analysis\\telemetry_trace.json"
+$target = '{safe_target}'
+$logPath = if (Test-Path -Path "C:\\Analysis" -PathType Container) {{ Join-Path $env:TEMP "telemetry_trace.json" }} else {{ "telemetry_trace.json" }}
 $duration = {duration_sec}
 
 Write-Host "[+] Monitoring $target for $duration seconds..."

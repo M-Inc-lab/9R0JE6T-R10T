@@ -215,9 +215,17 @@ class PipelineStateMachine:
         if self.format_name == "PE":
             self.static_metadata = PEAnalyzer(self.binary_bytes).analyze()
         elif self.format_name == "ELF":
-            self.static_metadata = ELFAnalyzer(self.binary_bytes).full_audit()
+            elf_analyzer = ELFAnalyzer(self.binary_bytes)
+            base_meta = elf_analyzer.analyze()
+            audit_meta = elf_analyzer.full_audit()
+            base_meta.update(audit_meta)
+            self.static_metadata = base_meta
         elif self.format_name == "Mach-O":
-            self.static_metadata = MachOAnalyzer(self.binary_bytes).full_audit()
+            macho_analyzer = MachOAnalyzer(self.binary_bytes)
+            base_meta = macho_analyzer.analyze()
+            audit_meta = macho_analyzer.full_audit()
+            base_meta.update(audit_meta)
+            self.static_metadata = base_meta
         else:
             self.static_metadata = {"entropy": PEAnalyzer.calculate_entropy(self.binary_bytes)}
 
@@ -229,8 +237,10 @@ class PipelineStateMachine:
     def _stage_4(self) -> bool:
         # Multi-tool correlation: invoke Radare2 / Capstone via CorrelationEngine
         corr = CorrelationEngine()
-        self.correlation_results = corr.analyze_artifact(self.provenance.working_copy_path)
-        summary = f"Reconstructed disassembly via Capstone/Radare2. Functions: {self.correlation_results.get('functions_count', 0)}"
+        self.correlation_results = corr.analyze_artifact(self.provenance.working_copy_path, run_ghidra=False)
+        r2_funcs = self.correlation_results.get("tool_radare2", {}).get("functions_count", 0)
+        cs_insns = len(self.correlation_results.get("tool_capstone", {}).get("disassembled_instructions", []))
+        summary = f"Reconstructed disassembly via Capstone ({cs_insns} insns) / Radare2 ({r2_funcs} funcs)."
         self._mark_stage(4, StageStatus.COMPLETED, summary=summary)
         return True
 
@@ -239,21 +249,29 @@ class PipelineStateMachine:
         # 1. Attempt headless Ghidra extraction if available
         ghidra = GhidraHeadlessAnalyzer()
         self.ghidra_results = ghidra.analyze(self.provenance.working_copy_path, timeout=60)
-        decomp_count = len(self.ghidra_results.get("decompiled_functions", {}))
+        g_analysis = self.ghidra_results.get("analysis", {})
+        decomp_list = self.ghidra_results.get("decompiled_functions") or g_analysis.get("decompiled_functions", [])
+        decomp_count = len(decomp_list)
 
         # 2. Build Call-Graph & Taint Flow analysis
         from reverse_forge.dataflow_engine import DataFlowGraph
         dfg = DataFlowGraph()
-        sinks = self.ghidra_results.get("sink_xrefs", {})
+        sinks = dict(self.ghidra_results.get("sink_xrefs", {}))
+        if not sinks and g_analysis.get("dangerous_sink_xrefs"):
+            for item in g_analysis["dangerous_sink_xrefs"]:
+                s_name = item.get("sink", "").lstrip("_")
+                caller = item.get("caller_function") or "unknown"
+                if s_name:
+                    sinks.setdefault(s_name, []).append(caller)
+        self.ghidra_results["sink_xrefs"] = sinks
         if sinks:
             dfg.build_from_xrefs(sinks)
 
-        # Also add imports/exports relationships if present
-        imports = self.static_metadata.get("imports", [])
-        for imp in imports:
-            func = imp.get("function") or imp.get("name")
-            if func:
-                dfg.add_edge("main", str(func))
+        # Also add imported symbols to call-graph so co-occurring sources & sinks are detected
+        for sym in self.static_metadata.get("imported_symbols", []):
+            clean_sym = str(sym).lstrip("_")
+            if clean_sym:
+                dfg.add_edge("entry", clean_sym)
 
         flows = dfg.analyze_source_to_sink_flows()
         for flow in flows:
@@ -280,50 +298,55 @@ class PipelineStateMachine:
 
     # Stage 6: Security Interface & Mitigations Analysis
     def _stage_6(self) -> bool:
+        severity_to_cvss = {"CRITICAL": 9.2, "HIGH": 7.8, "MEDIUM": 5.5, "LOW": 3.5}
         # Evaluate platform mitigations and dangerous calls
         if self.format_name == "PE":
             try:
                 from reverse_forge.windows_engine import WindowsEngine
-                wengine = WindowsEngine(self.provenance.working_copy_path)
-                audit = wengine.full_audit()
-                for vuln in audit.get("vulnerabilities", []):
+                with WindowsEngine(self.provenance.working_copy_path) as wengine:
+                    audit = wengine.full_audit()
+                pe_vulns = audit.get("identified_vulnerabilities") or audit.get("vulnerabilities", [])
+                for vuln in pe_vulns:
+                    v_title = vuln.get("title") or vuln.get("rule", "PE Security Weakness")
+                    v_sev = vuln.get("severity", "MEDIUM").upper()
                     self.report_generator.add_finding(Finding(
                         finding_id=vuln.get("id", "WIN-VULN"),
-                        title=vuln.get("rule", "PE Security Weakness"),
-                        vulnerability_class="Binary Mitigation Deficiency",
+                        title=v_title,
+                        vulnerability_class="Binary Mitigation / API Deficiency",
                         confidence="Confirmed",
-                        cvss_score=5.5 if "DEP" in vuln.get("rule", "") or "ASLR" in vuln.get("rule", "") else 7.0,
-                        cwe_id="CWE-657",
-                        function_symbol="N/A",
-                        address_or_offset="PE Header",
+                        cvss_score=severity_to_cvss.get(v_sev, 5.5),
+                        cwe_id=vuln.get("cwe", "CWE-693"),
+                        function_symbol="PE Header / IAT",
+                        address_or_offset="OptionalHeader",
                         what=vuln.get("description", ""),
-                        why="Binary was compiled without modern mitigation flags.",
-                        where="Optional Header / DllCharacteristics",
-                        when="Process initialization",
-                        how="Binary loader maps sections without security enforcement.",
-                        remediation=vuln.get("remediation", "Recompile with /NXCOMPAT, /DYNAMICBASE, and /GUARD:CF.")
+                        why="Binary was compiled without modern mitigation flags or imports unsafe APIs.",
+                        where="PE OptionalHeader / Import Directory",
+                        when="Process initialization or runtime API invocation",
+                        how="Loader maps sections without security enforcement or invokes unbounded CRT APIs.",
+                        remediation=vuln.get("remediation", "Recompile with /NXCOMPAT, /DYNAMICBASE, and /guard:cf.")
                     ))
             except Exception as e:
                 self.report_generator.add_blocker(f"WindowsEngine PE audit bypassed: {e}")
 
-        elif self.format_name == "ELF":
-            mit = self.static_metadata.get("mitigations", {})
-            if not mit.get("nx", {}).get("enabled", True):
+        elif self.format_name in ("ELF", "Mach-O"):
+            for vuln in self.static_metadata.get("identified_vulnerabilities", []):
+                v_title = vuln.get("title", f"{self.format_name} Security Weakness")
+                v_sev = vuln.get("severity", "MEDIUM").upper()
                 self.report_generator.add_finding(Finding(
-                    finding_id="ELF-VULN-01",
-                    title="Missing Executable Space Protection (Non-NX / Executable Stack)",
-                    vulnerability_class="Binary Mitigation Deficiency",
+                    finding_id=vuln.get("id", f"{self.format_name.upper()}-VULN"),
+                    title=v_title,
+                    vulnerability_class="Binary Mitigation / Symbol Deficiency",
                     confidence="Confirmed",
-                    cvss_score=7.8,
-                    cwe_id="CWE-119",
-                    function_symbol="GNU_STACK",
-                    address_or_offset="PT_GNU_STACK",
-                    what="Stack memory is marked executable (RWE).",
-                    why="GNU_STACK segment lacks non-executable flag.",
-                    where="ELF Program Header Table",
-                    when="Exploitation of stack buffer overflow",
-                    how="Shellcode placed on the stack can be directly executed by jumping to SP.",
-                    remediation="Compile with `-z noexecstack`."
+                    cvss_score=severity_to_cvss.get(v_sev, 5.5),
+                    cwe_id=vuln.get("cwe", "CWE-119"),
+                    function_symbol=f"{self.format_name} Header / Symbol Table",
+                    address_or_offset=str(self.static_metadata.get("entry_point", "0x0")),
+                    what=vuln.get("description", ""),
+                    why=f"{self.format_name} binary lacks recommended hardening or imports hazardous symbols.",
+                    where=f"{self.format_name} Program/Load Headers & Symbol Table",
+                    when="Binary load or input processing",
+                    how="Missing mitigation or unbounded symbol consumption increases exploitability.",
+                    remediation="Recompile with PIE, non-executable stack, Full RELRO, and bounded string APIs."
                 ))
 
         # Cryptographic algorithms & embedded secrets scan

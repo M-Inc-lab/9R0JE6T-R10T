@@ -293,7 +293,8 @@ def main():
         res = sm.run_all()
         for st in res["stages"]:
             status_symbol = "[+]" if st["status"] == "COMPLETED" else "[-]"
-            print(f"  {status_symbol} Stage {st['stage']}: {st['name']} -> {st['status']} ({st['summary']})")
+            detail = st["summary"] if st["summary"] else (st.get("error") or "")
+            print(f"  {status_symbol} Stage {st['stage']}: {st['name']} -> {st['status']} ({detail})")
 
         if args.output_json:
             with open(args.output_json, "w", encoding="utf-8") as f:
@@ -352,7 +353,13 @@ def main():
         g_res = ghidra.analyze(args.input, timeout=60)
 
         dfg = DataFlowGraph()
-        sinks = g_res.get("sink_xrefs", {})
+        sinks = dict(g_res.get("sink_xrefs", {}))
+        if not sinks and g_res.get("analysis", {}).get("dangerous_sink_xrefs"):
+            for item in g_res["analysis"]["dangerous_sink_xrefs"]:
+                s_name = item.get("sink", "").lstrip("_")
+                caller = item.get("caller_function") or "unknown"
+                if s_name:
+                    sinks.setdefault(s_name, []).append(caller)
         if sinks:
             dfg.build_from_xrefs(sinks)
 

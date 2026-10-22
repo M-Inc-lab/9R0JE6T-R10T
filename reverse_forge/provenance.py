@@ -99,6 +99,11 @@ class ProvenanceManager:
         isolated_filename = f"{hashes['sha256'][:12]}_{basename}"
         working_path = os.path.join(self.working_copies_dir, isolated_filename)
 
+        # If a previous read-only working copy exists, make it writable/removable before refreshing
+        if os.path.exists(working_path):
+            os.chmod(working_path, stat.S_IWRITE | stat.S_IREAD)
+            os.remove(working_path)
+
         # Copy byte-for-byte to working space
         shutil.copy2(abs_original, working_path)
 

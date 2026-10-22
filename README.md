@@ -1,35 +1,43 @@
 # 9R0JE6T-R10T (`R3V3R53//F0RG3` v1.0.0)
 
-Cross-platform static binary reconnaissance, mitigation auditing, multi-tool correlation (Native + Radare2 + Ghidra Headless + Capstone), and isolated sandbox profile generation engine.
+Autonomous, multi-tool cross-platform reverse engineering, static/dynamic correlation, and vulnerability research engine implementing the **R3V3RSE//F0RG3 v1.0** specification.
 
-## Features
+## Architecture & Module Inventory (Phases 1–9)
 
-- **Cross-Platform Format Reconnaissance (`triage`):** Pure-Python structural parsers for Windows `PE32`/`PE32+`, Linux `ELF32`/`ELF64`, Apple `Mach-O` (`32-bit`, `64-bit`, and `Universal/Fat`), and `JVM Class` bytecode (`0xCAFEBABE` disambiguation), plus SHA-256/MD5 hashing and section entropy calculation.
-- **Multi-Engine Correlation (`correlate` & `ghidra-audit`):** Combines native structural parsers with `radare2` (`aa; iIj; aflj`), headless `Ghidra` (`analyzeHeadless` exporting functions, dangerous sink cross-references, and decompiled C pseudocode), and `Capstone` entry-point disassembly using exact virtual-to-file offset mapping.
-- **Windows PE Security & IAT/EAT Audit (`win-checksec`, `win-iat`, `win-audit`):** Inspects `ASLR`, `HighEntropyVA`, `DEP/NX`, `CFG`, `SafeSEH`, and `Authenticode` signatures (`pefile` with built-in pure-Python fallback) and maps imported APIs against dangerous capability categories.
-- **Linux ELF Security & Dynamic Linking Audit (`elf-audit`):** Parses `PT_DYNAMIC` (`DT_NEEDED`, `DT_RPATH`, `DT_RUNPATH`), `.dynsym`/`.symtab` imports and exports, and `NX`, `PIE`, `RELRO` (Full/Partial), `Stack Canary`, and `FORTIFY_SOURCE` mitigations.
-- **Apple Mach-O Security, Symbol & Entitlements Audit (`macho-audit`):** Parses `MH_PIE`/stack/heap flags, `LC_LOAD_DYLIB`, `LC_RPATH`, `LC_SYMTAB` imports/exports/canaries, and `LC_CODE_SIGNATURE` (`CS_SuperBlob` + embedded XML entitlements).
-- **Hardened Windows Sandbox Profile Generator (`win-sandbox`):** Generates XML-escaped `.wsb` profiles mapping target directories read-only into `C:\Analysis`.
-- **Authenticated Colab T4 GPU Bridge (`colab_t4_server.ipynb`, `connect_colab.py`, `gpu_client.py`):** Binds Uvicorn to `127.0.0.1`, enforces Bearer token authentication (`COLAB_BRIDGE_TOKEN`), and restricts remote execution to allowlisted binaries with `shell=False`.
+| Module | Spec Mapping | Capabilities |
+| :--- | :--- | :--- |
+| `reverse_forge/cli.py` | §00, §15 | Unified CLI orchestrating 18 subcommands across static, dynamic, taint, crypto, and pipeline workflows. |
+| `reverse_forge/provenance.py` | §01, §03.1, §04 | Cryptographic provenance (`SHA-256`, `SHA-1`, `MD5`), `ScopeLedger` authorization checks, and read-only working-copy isolation (`0444`). |
+| `reverse_forge/layer_unpacker.py` | §01.4, §04.2 | Multi-layer container signature scanner (`ZIP`, `GZIP`, `SquashFS`, `U-Boot`), `.NET CLR` metadata inspector, `JAR`/`WAR` manifest/class analyzer, and Universal Mach-O slice parser. |
+| `reverse_forge/pe_analyzer.py` & `windows_engine.py` | §01.1, §05, §13.1 | Pure-Python + `pefile` PE32/PE32+ header, section, mitigation (`ASLR`, `DEP`, `CFG`, `SafeSEH`), Authenticode (`$env:RF_TARGET_PATH`), and IAT/EAT capability auditor. |
+| `reverse_forge/elf_analyzer.py` | §01.2, §05, §13.5 | ELF32/ELF64 segment, section, `PT_DYNAMIC` (`DT_NEEDED`, `RPATH`, `RUNPATH`), `.dynsym`/`.symtab` symbol, and mitigation (`NX`, `PIE`, `Full/Partial RELRO`, `Canary`, `FORTIFY_SOURCE`) auditor. |
+| `reverse_forge/macho_analyzer.py` | §01.3, §05, §13.6 | Mach-O 32/64/Fat parser with `JVM .class` (`0xCAFEBABE`) disambiguation, `LC_LOAD_DYLIB`, `LC_RPATH`, `LC_SYMTAB`, and `LC_CODE_SIGNATURE` (`CS_SuperBlob` + XML entitlements) auditor. |
+| `reverse_forge/ghidra_analyzer.py` & `correlation_engine.py` | §02.1–§02.4 | Multi-tool orchestrator combining Native Parsers, `Radare2` (`aa; iIj; aflj`), headless `Ghidra` (`analyzeHeadless` exporting functions, sink xrefs, and decompiled C pseudocode), and `Capstone` entry-point disassembly. |
+| `reverse_forge/dataflow_engine.py` | §05.3, §09, §10 | Directed call-graph builder and BFS source-to-sink taint reachability engine (`recv`/`fread`/`getenv` to `strcpy`/`sprintf`/`system`/`free`). |
+| `reverse_forge/crypto_engine.py` | §14 | Binary constant scanner (`MD5`, `SHA-1`, `SHA-256`, `AES Rcon/S-Box`) and masked hardcoded secret detector (`RSA/PEM`, `AWS AKIA`, `JWT`, generic API keys). |
+| `reverse_forge/windows_sandbox.py` & `behavioral_engine.py` | §07, §08 | Hardened `.wsb` XML generator, PowerShell telemetry collector script generator, and runtime trace (`process`, `file`, `registry`, `network`, `crash`) to static indicator correlator. |
+| `reverse_forge/pipeline.py` & `reporter.py` | §03.2, §16–§19 | 12-stage state machine (`Stage 0`–`Stage 11`) with `AutonomyLevel` (`0`–`4`) HIL gates, `AntiLoopGuard`, and dual Executive Summary + Technical 5WH report generator (JSON & Markdown). |
+| `reverse_forge/remediation_engine.py` | §20–§22 | Automated C/C++ unified diff patch synthesizer, compiler hardening flag recommender, and standalone C regression test harness generator mapped by CWE. |
 
 ## Quick Start
 
 ```bash
-# Discover installed reverse-engineering tools
-python3 -m reverse_forge.cli detect-tools
+# Run the full 12-stage autonomous pipeline (outputs Executive + Technical Markdown/JSON reports)
+python3 -m reverse_forge.cli pipeline -i /path/to/binary --autonomy 3 --output-md report.md --output-json report.json
 
-# Triage any PE, ELF, Mach-O, or JVM .class binary
-python3 -m reverse_forge.cli triage -i /path/to/binary
-
-# Run multi-tool correlation (Native + Radare2 + Ghidra + Capstone)
-python3 -m reverse_forge.cli correlate -i /path/to/binary
-
-# Run platform-specific security & capability audits
+# Platform-specific deep static audits
 python3 -m reverse_forge.cli win-audit -i /path/to/binary.exe
 python3 -m reverse_forge.cli elf-audit -i /bin/ls
 python3 -m reverse_forge.cli macho-audit -i /path/to/macos_binary
 python3 -m reverse_forge.cli ghidra-audit -i /path/to/binary
 
-# Run automated security & parser regression test suite
+# Specialized analysis engines
+python3 -m reverse_forge.cli unpack -i /path/to/container_or_dotnet.exe
+python3 -m reverse_forge.cli dataflow -i /path/to/binary
+python3 -m reverse_forge.cli crypto-audit -i /path/to/binary
+python3 -m reverse_forge.cli behavioral-correlate -t telemetry_trace.json -b /path/to/binary
+python3 -m reverse_forge.cli remediate --cwe CWE-120 --symbol parse_packet
+
+# Run the 31-test automated security & functional regression suite
 python3 -m unittest discover -s tests -v
 ```

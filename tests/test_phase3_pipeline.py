@@ -89,5 +89,19 @@ class TestPhase3PipelineStateMachine(unittest.TestCase):
         self.assertTrue(len(res["report_markdown"]) > 0)
 
 
+
+    def test_full_pipeline_on_elf_binary(self):
+        if os.path.exists("/bin/ls"):
+            sm = PipelineStateMachine(
+                artifact_path="/bin/ls",
+                autonomy_level=AutonomyLevel.AUTONOMOUS,
+                workspace_dir=self.tmp_dir.name
+            )
+            res = sm.run_all()
+            for st in res["stages"]:
+                self.assertIn(st["status"], (StageStatus.COMPLETED.value, StageStatus.SKIPPED.value))
+            self.assertGreaterEqual(len(res["report_json"]["findings"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -177,11 +177,19 @@ class GhidraHeadlessAnalyzer:
                 if os.path.exists(out_json):
                     with open(out_json, "r", encoding="utf-8") as jf:
                         export_data = json.load(jf)
+                    sink_map: Dict[str, List[str]] = {}
+                    for item in export_data.get("dangerous_sink_xrefs", []):
+                        s_name = item.get("sink", "").lstrip("_")
+                        caller = item.get("caller_function") or "unknown"
+                        if s_name:
+                            sink_map.setdefault(s_name, []).append(caller)
                     return {
                         "status": "success",
                         "headless_binary": self.ghidra_bin,
                         "returncode": proc.returncode,
                         "analysis": export_data,
+                        "sink_xrefs": sink_map,
+                        "decompiled_functions": export_data.get("decompiled_functions", []),
                     }
                 return {
                     "status": "error",
