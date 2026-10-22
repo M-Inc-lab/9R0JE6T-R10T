@@ -180,6 +180,29 @@ def main():
     rem_p.add_argument("--symbol", default="main", help="Target function symbol name")
     rem_p.add_argument("--output", "-o", help="Path to write JSON remediation payload")
 
+    # ida-audit (Headless IDA Pro + Hex-Rays batch analysis)
+    ida_p = subparsers.add_parser("ida-audit", help="Headless IDA Pro (idat64/idat) + Hex-Rays decompilation & FLIRT export")
+    ida_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    ida_p.add_argument("--output", "-o", help="Path to write JSON results")
+    ida_p.add_argument("--timeout", type=int, default=120, help="Headless IDA timeout in seconds")
+
+    # bindiff (Structural binary & patch diffing)
+    diff_p = subparsers.add_parser("bindiff", help="Compare two binary versions across sections, imports, and mitigations")
+    diff_p.add_argument("--old", required=True, help="Baseline/unpatched binary path")
+    diff_p.add_argument("--new", required=True, help="Updated/patched binary path")
+    diff_p.add_argument("--output", "-o", help="Path to write JSON diff report")
+
+    # symbolic-verify (SSA Symbolic Interval Bounds Verification)
+    sym_p = subparsers.add_parser("symbolic-verify", help="Verify buffer access bounds over an SSA JSON block")
+    sym_p.add_argument("--ssa-json", required=True, help="Path to JSON list of SSAOperation definitions")
+    sym_p.add_argument("--output", "-o", help="Path to write symbolic proof JSON")
+
+    # semantic-recover (Stripped function naming & struct field recovery)
+    sem_p = subparsers.add_parser("semantic-recover", help="Recover semantic function names and struct fields from pseudocode")
+    sem_p.add_argument("--function", default="sub_401000", help="Original stripped function name")
+    sem_p.add_argument("--code-file", required=True, help="Path to decompiled C pseudocode file")
+    sem_p.add_argument("--output", "-o", help="Path to write recovered symbol JSON")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -407,6 +430,43 @@ def main():
             "regression_harness": asdict(harness)
         }
         _write_or_print(res, args.output, "Defensive Remediation Synthesis")
+
+    elif args.command == "ida-audit":
+        _require_existing_file(args.input)
+        from reverse_forge.ida_analyzer import IDAHeadlessAnalyzer
+        ida = IDAHeadlessAnalyzer()
+        res = ida.analyze(args.input, timeout=args.timeout)
+        _write_or_print(res, args.output, "IDA Headless Audit")
+
+    elif args.command == "bindiff":
+        _require_existing_file(args.old)
+        _require_existing_file(args.new)
+        from reverse_forge.bindiff_engine import BinaryDiffEngine
+        differ = BinaryDiffEngine()
+        res = differ.diff_files(args.old, args.new)
+        _write_or_print(res, args.output, "Structural Binary Diff")
+
+    elif args.command == "symbolic-verify":
+        _require_existing_file(args.ssa_json)
+        from dataclasses import asdict
+        from reverse_forge.symbolic_ir_engine import SymbolicIREngine, SSAOperation
+        with open(args.ssa_json, "r", encoding="utf-8") as f:
+            raw_ops = json.load(f)
+        ops = [SSAOperation(**item) for item in raw_ops]
+        engine = SymbolicIREngine()
+        proofs = engine.evaluate_ssa_block(ops)
+        res = {"ssa_operations_count": len(ops), "proofs": [asdict(p) for p in proofs]}
+        _write_or_print(res, args.output, "Symbolic Bounds Verification")
+
+    elif args.command == "semantic-recover":
+        _require_existing_file(args.code_file)
+        from dataclasses import asdict
+        from reverse_forge.semantic_recovery import SemanticRecoveryEngine
+        with open(args.code_file, "r", encoding="utf-8") as f:
+            code_text = f.read()
+        rec_engine = SemanticRecoveryEngine()
+        recovered = rec_engine.recover_from_pseudocode(args.function, code_text)
+        _write_or_print(asdict(recovered), args.output, "Semantic Symbol & Struct Recovery")
 
 
 if __name__ == "__main__":
