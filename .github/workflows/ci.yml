@@ -1,0 +1,43 @@
+name: R3V3R53//F0RG3 CI & Regression Suite
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install optional dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pefile capstone
+
+      - name: Run full unit & security regression suite
+        run: |
+          python -m unittest discover -s tests -v
+
+      - name: Run CLI smoke checks
+        run: |
+          python -m reverse_forge.cli detect-tools
+          python -m reverse_forge.cli remediate --cwe CWE-120 --symbol parse_input

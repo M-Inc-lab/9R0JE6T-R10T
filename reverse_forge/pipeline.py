@@ -230,7 +230,16 @@ class PipelineStateMachine:
         else:
             self.static_metadata = {"entropy": PEAnalyzer.calculate_entropy(self.binary_bytes)}
 
-        summary = f"Extracted header, sections, imports, and basic symbols for {self.format_name}"
+        from reverse_forge.signature_engine import SignatureEngine
+        sig_scan = SignatureEngine().full_signature_scan(self.binary_bytes)
+        self.static_metadata["signature_scan"] = sig_scan
+        prologues = sig_scan["stripped_function_recovery"]["estimated_function_prologues_total"]
+        sig_hits = sig_scan["total_signature_matches"]
+
+        summary = (
+            f"Extracted header, sections, and symbols for {self.format_name} "
+            f"(Signature hits: {sig_hits}, Prologue candidates: {prologues})"
+        )
         self._mark_stage(3, StageStatus.COMPLETED, summary=summary)
         return True
 

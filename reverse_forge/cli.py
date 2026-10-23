@@ -216,6 +216,12 @@ def main():
     frida_p.add_argument("--module", default=None, help="Optional target module/DLL/shared-object name")
     frida_p.add_argument("--output", "-o", default="frida_telemetry.js", help="Output .js script path")
 
+    # sig-scan (Wildcard byte-pattern & stripped function prologue scanner)
+    sig_p = subparsers.add_parser("sig-scan", help="Scan binary for FLIRT/YARA-style byte signatures and stripped function prologues")
+    sig_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    sig_p.add_argument("--rules", default=None, help="Optional path to custom JSON signature rules")
+    sig_p.add_argument("--output", "-o", help="Path to write JSON signature scan results")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -502,6 +508,18 @@ def main():
         sym_list = [s.strip() for s in args.symbols.split(",") if s.strip()]
         out_js = FridaDBIEngine.write_frida_script(args.output, sym_list, module_name=args.module)
         print(f"[+] Frida DBI telemetry script generated: {out_js}")
+
+    elif args.command == "sig-scan":
+        _require_existing_file(args.input)
+        from reverse_forge.signature_engine import SignatureEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        sig_engine = SignatureEngine()
+        if args.rules:
+            sig_engine.load_rules_from_json(args.rules)
+        res = sig_engine.full_signature_scan(data)
+        res["artifact"] = os.path.abspath(args.input)
+        _write_or_print(res, args.output, "Signature & Prologue Scan")
 
 
 if __name__ == "__main__":
