@@ -153,6 +153,8 @@ def main():
     pipe_p.add_argument("--output-json", help="Path to write final report JSON")
     pipe_p.add_argument("--output-md", help="Path to write final report Markdown")
     pipe_p.add_argument("--output-html", help="Path to write interactive HTML/SVG workbench dashboard")
+    pipe_p.add_argument("--output-sarif", help="Path to write OASIS SARIF v2.1.0 report")
+    pipe_p.add_argument("--output-sbom", help="Path to write CycloneDX v1.5 SBOM JSON")
 
     # behavioral-correlate (dynamic runtime correlation)
     behav_p = subparsers.add_parser("behavioral-correlate", help="Correlate runtime sandbox telemetry JSON with static analysis")
@@ -227,6 +229,12 @@ def main():
     dash_p = subparsers.add_parser("dashboard", help="Generate interactive single-file HTML5/SVG reverse-engineering workbench")
     dash_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
     dash_p.add_argument("--output", "-o", default="reverse_forge_workbench.html", help="Output HTML file path")
+
+    # sbom (CycloneDX v1.5 SBOM & SARIF v2.1.0 Exporter)
+    sbom_p = subparsers.add_parser("sbom", help="Generate CycloneDX v1.5 Binary SBOM and optional SARIF v2.1.0 report")
+    sbom_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    sbom_p.add_argument("--output", "-o", help="Path to write CycloneDX v1.5 SBOM JSON")
+    sbom_p.add_argument("--sarif", help="Optional path to write OASIS SARIF v2.1.0 JSON")
 
     args = parser.parse_args()
     installer = ToolchainInstaller()
@@ -359,7 +367,27 @@ def main():
             html_out = DashboardGenerator.write_dashboard_from_pipeline(sm, args.output_html)
             print(f"[+] Interactive HTML/SVG dashboard saved to {html_out}")
 
-        if not args.output_json and not args.output_md and not getattr(args, "output_html", None):
+        if getattr(args, "output_sarif", None):
+            from reverse_forge.sarif_sbom_exporter import SARIFExporter
+            sarif_doc = SARIFExporter.to_sarif(res)
+            with open(args.output_sarif, "w", encoding="utf-8") as f:
+                json.dump(sarif_doc, f, indent=2)
+            print(f"[+] SARIF v2.1.0 report saved to {args.output_sarif}")
+
+        if getattr(args, "output_sbom", None):
+            from reverse_forge.sarif_sbom_exporter import CycloneDXExporter
+            sbom_doc = CycloneDXExporter.to_cyclonedx(res, static_metadata=sm.static_metadata)
+            with open(args.output_sbom, "w", encoding="utf-8") as f:
+                json.dump(sbom_doc, f, indent=2)
+            print(f"[+] CycloneDX v1.5 SBOM saved to {args.output_sbom}")
+
+        if not any([
+            args.output_json,
+            args.output_md,
+            getattr(args, "output_html", None),
+            getattr(args, "output_sarif", None),
+            getattr(args, "output_sbom", None),
+        ]):
             print("\n" + res["report_markdown"])
 
     elif args.command == "behavioral-correlate":
@@ -540,6 +568,20 @@ def main():
         sm.run_all()
         html_out = DashboardGenerator.write_dashboard_from_pipeline(sm, args.output)
         print(f"[+] Interactive HTML/SVG workbench generated: {html_out}")
+
+    elif args.command == "sbom":
+        _require_existing_file(args.input)
+        from reverse_forge.pipeline import PipelineStateMachine, AutonomyLevel
+        from reverse_forge.sarif_sbom_exporter import CycloneDXExporter, SARIFExporter
+        sm = PipelineStateMachine(args.input, autonomy_level=AutonomyLevel.AUTONOMOUS)
+        state = sm.run_all()
+        sbom_doc = CycloneDXExporter.to_cyclonedx(state, static_metadata=sm.static_metadata)
+        if args.sarif:
+            sarif_doc = SARIFExporter.to_sarif(state)
+            with open(args.sarif, "w", encoding="utf-8") as sf:
+                json.dump(sarif_doc, sf, indent=2)
+            print(f"[+] SARIF v2.1.0 report written to {args.sarif}")
+        _write_or_print(sbom_doc, args.output, "CycloneDX v1.5 SBOM")
 
 
 if __name__ == "__main__":
