@@ -591,22 +591,29 @@ class PipelineStateMachine:
     # Stage 11: Defensive Remediation Synthesis
     def _stage_11(self) -> bool:
         from reverse_forge.remediation_engine import RemediationEngine
+        from reverse_forge.patch_verifier import PatchVerifier
         rem_engine = RemediationEngine()
+        verifier = PatchVerifier()
         remediation_count = 0
+        verified_count = 0
 
         # Synthesize patches and regression harnesses for confirmed findings
         for f in self.report_generator.findings:
             if f.confidence in ("Confirmed", "Probable") and f.cwe_id:
                 patch = rem_engine.generate_defensive_patch(f.finding_id, f.cwe_id, f.function_symbol)
                 harness = rem_engine.generate_regression_test_harness(self.provenance.artifact_name, f.cwe_id)
+                v_report = verifier.verify_patch_resilience(patch)
                 remediation_count += 1
+                if v_report.verdict == "VERIFIED_DEFENDED":
+                    verified_count += 1
                 f.remediation += (
                     f"\n\n```diff\n{patch.diff_patch}```\n"
                     f"**Hardening Flags:** `{', '.join(patch.compiler_hardening_flags)}`\n"
+                    f"**Verification:** `{v_report.verdict}` ({v_report.invariant_checked})\n"
                     f"**Defensive Test:** `{harness.execution_command}`"
                 )
 
-        summary = f"Synthesized {remediation_count} defensive code patches and regression test harnesses."
+        summary = f"Synthesized {remediation_count} defensive code patches ({verified_count} verified) and regression test harnesses."
         self._mark_stage(11, StageStatus.COMPLETED, summary=summary)
         return True
 
