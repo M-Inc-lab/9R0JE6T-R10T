@@ -236,9 +236,31 @@ class PipelineStateMachine:
         prologues = sig_scan["stripped_function_recovery"]["estimated_function_prologues_total"]
         sig_hits = sig_scan["total_signature_matches"]
 
+        # Anti-injection sanitization for symbols, section names, and strings
+        from reverse_forge.anti_injection_guard import AntiInjectionGuard
+        guard = AntiInjectionGuard()
+        self.static_metadata, injection_attempts = guard.sanitize_metadata_dict(self.static_metadata)
+        for att in injection_attempts:
+            self.report_generator.add_finding(Finding(
+                finding_id="ADVERSARIAL-METADATA-POISON",
+                title=f"Adversarial Binary Metadata Attack: {att.injection_type}",
+                vulnerability_class="Adversarial Injection / AI Poisoning",
+                confidence="Confirmed",
+                cvss_score=7.5,
+                cwe_id="CWE-116",
+                function_symbol="Binary Header / Symbol Table",
+                address_or_offset=att.source_field,
+                what=f"Target binary contains adversarial payload: {att.raw_payload_snippet}",
+                why="Binary attempts to mislead automated analyzers or poison LLM decompiler context.",
+                where=att.source_field,
+                when="Static analysis ingestion",
+                how="Adversarial payload injected into symbol or section table.",
+                remediation=att.defense_action,
+            ))
+
         summary = (
             f"Extracted header, sections, and symbols for {self.format_name} "
-            f"(Signature hits: {sig_hits}, Prologue candidates: {prologues})"
+            f"(Signature hits: {sig_hits}, Prologue candidates: {prologues}, Injections neutralized: {len(injection_attempts)})"
         )
         self._mark_stage(3, StageStatus.COMPLETED, summary=summary)
         return True
