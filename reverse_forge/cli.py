@@ -152,6 +152,7 @@ def main():
     pipe_p.add_argument("--autonomy", choices=["0", "1", "2", "3", "4"], default="2", help="Autonomy level (0=Manual, 2=Supervised, 3=Autonomous)")
     pipe_p.add_argument("--output-json", help="Path to write final report JSON")
     pipe_p.add_argument("--output-md", help="Path to write final report Markdown")
+    pipe_p.add_argument("--output-html", help="Path to write interactive HTML/SVG workbench dashboard")
 
     # behavioral-correlate (dynamic runtime correlation)
     behav_p = subparsers.add_parser("behavioral-correlate", help="Correlate runtime sandbox telemetry JSON with static analysis")
@@ -221,6 +222,11 @@ def main():
     sig_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
     sig_p.add_argument("--rules", default=None, help="Optional path to custom JSON signature rules")
     sig_p.add_argument("--output", "-o", help="Path to write JSON signature scan results")
+
+    # dashboard (Interactive HTML5/SVG Reverse-Engineering Workbench)
+    dash_p = subparsers.add_parser("dashboard", help="Generate interactive single-file HTML5/SVG reverse-engineering workbench")
+    dash_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    dash_p.add_argument("--output", "-o", default="reverse_forge_workbench.html", help="Output HTML file path")
 
     args = parser.parse_args()
     installer = ToolchainInstaller()
@@ -348,7 +354,12 @@ def main():
                 f.write(res["report_markdown"])
             print(f"[+] Markdown report saved to {args.output_md}")
 
-        if not args.output_json and not args.output_md:
+        if getattr(args, "output_html", None):
+            from reverse_forge.visual_dashboard import DashboardGenerator
+            html_out = DashboardGenerator.write_dashboard_from_pipeline(sm, args.output_html)
+            print(f"[+] Interactive HTML/SVG dashboard saved to {html_out}")
+
+        if not args.output_json and not args.output_md and not getattr(args, "output_html", None):
             print("\n" + res["report_markdown"])
 
     elif args.command == "behavioral-correlate":
@@ -520,6 +531,15 @@ def main():
         res = sig_engine.full_signature_scan(data)
         res["artifact"] = os.path.abspath(args.input)
         _write_or_print(res, args.output, "Signature & Prologue Scan")
+
+    elif args.command == "dashboard":
+        _require_existing_file(args.input)
+        from reverse_forge.pipeline import PipelineStateMachine, AutonomyLevel
+        from reverse_forge.visual_dashboard import DashboardGenerator
+        sm = PipelineStateMachine(args.input, autonomy_level=AutonomyLevel.AUTONOMOUS)
+        sm.run_all()
+        html_out = DashboardGenerator.write_dashboard_from_pipeline(sm, args.output)
+        print(f"[+] Interactive HTML/SVG workbench generated: {html_out}")
 
 
 if __name__ == "__main__":
