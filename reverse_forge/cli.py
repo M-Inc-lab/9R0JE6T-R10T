@@ -318,6 +318,32 @@ def main():
     vsa_p.add_argument("--asm", required=True, help="Semicolon-separated assembly instructions")
     vsa_p.add_argument("--output", "-o", help="Optional path to write JSON VSA report")
 
+    # deobfuscate-mba (Phase 36: Mixed Boolean-Arithmetic & Opaque Predicate Deobfuscator)
+    mba_p = subparsers.add_parser("deobfuscate-mba", help="Simplify Mixed Boolean-Arithmetic (MBA) expressions via truth-table vectors")
+    mba_p.add_argument("--expr", required=True, help="Obfuscated MBA expression (e.g. '(x ^ y) + 2 * (x & y)')")
+    mba_p.add_argument("--output", "-o", help="Optional path to write JSON MBA report")
+
+    # cpp-rtti (Phase 37: C++ RTTI, VTable & Class Hierarchy Reconstructor)
+    rtti_p = subparsers.add_parser("cpp-rtti", help="Reconstruct C++ classes, namespaces, and vtables from Itanium/MSVC RTTI")
+    rtti_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    rtti_p.add_argument("--output", "-o", help="Optional path to write JSON RTTI report")
+
+    # firmware-base (Phase 38: Bare-Metal Firmware Base-Address & RTOS Scanner)
+    fwb_p = subparsers.add_parser("firmware-base", help="Infer memory load base address and RTOS signatures for raw firmware blobs")
+    fwb_p.add_argument("--input", "-i", required=True, help="Target raw firmware binary")
+    fwb_p.add_argument("--output", "-o", help="Optional path to write JSON firmware base report")
+
+    # eh-frame (Phase 39: DWARF / .eh_frame Unwind & Function Boundary Parser)
+    ehf_p = subparsers.add_parser("eh-frame", help="Parse .eh_frame CIE/FDE records to recover exact stripped function boundaries")
+    ehf_p.add_argument("--input", "-i", required=True, help="Target binary or raw .eh_frame blob")
+    ehf_p.add_argument("--output", "-o", help="Optional path to write JSON unwind report")
+
+    # trace-diff (Phase 40: Differential Execution Trace & Crash Root-Cause Aligner)
+    td_p = subparsers.add_parser("trace-diff", help="Align baseline vs. divergent execution traces and isolate divergence point")
+    td_p.add_argument("--base-addrs", required=True, help="Comma-separated hex addresses for baseline trace (e.g. '0x401000,0x401004,0x401008')")
+    td_p.add_argument("--div-addrs", required=True, help="Comma-separated hex addresses for divergent trace (e.g. '0x401000,0x401004,0x401020')")
+    td_p.add_argument("--output", "-o", help="Optional path to write JSON differential trace report")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -733,10 +759,12 @@ def main():
             "AntiInjectionGuard", "ZeroDayClusterEngine", "PatchVerifier",
             "DistributedCorpusClusteringEngine", "SSALifterAndOptimizer",
             "ControlFlowRegionStructurer", "DatalogVSAEngine",
+            "DeobfuscationEngine", "CppRTTIEngine", "FirmwareBaseEngine",
+            "UnwindFrameEngine", "TraceDiffEngine",
         ]
         report = {
-            "version": "4.0.0-apex",
-            "phases_implemented": 35,
+            "version": "5.0.0-omega",
+            "phases_implemented": 40,
             "internal_engines_count": len(internal_engines),
             "internal_engines_status": "ALL_READY",
             "external_toolchains": {
@@ -956,6 +984,53 @@ def main():
             addr += 4
         vsa_rep = DatalogVSAEngine().analyze_instruction_facts(insns)
         _write_or_print(asdict(vsa_rep), args.output, "Datalog & Value-Set Analysis")
+
+    elif args.command == "deobfuscate-mba":
+        from dataclasses import asdict
+        from reverse_forge.deobfuscation_engine import DeobfuscationEngine
+        res = DeobfuscationEngine().simplify_mba_expression(args.expr)
+        _write_or_print(asdict(res), args.output, "MBA Algebraic Deobfuscation")
+
+    elif args.command == "cpp-rtti":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.cpp_rtti_engine import CppRTTIEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = CppRTTIEngine().analyze_binary_rtti(data)
+        _write_or_print(asdict(rep), args.output, "C++ RTTI & VTable Reconstruction")
+
+    elif args.command == "firmware-base":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.firmware_base_engine import FirmwareBaseEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = FirmwareBaseEngine().scan_firmware_base(data)
+        _write_or_print(asdict(rep), args.output, "Bare-Metal Firmware Base-Address Scan")
+
+    elif args.command == "eh-frame":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.unwind_frame_engine import UnwindFrameEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = UnwindFrameEngine().parse_eh_frame_bytes(data)
+        _write_or_print(asdict(rep), args.output, "DWARF .eh_frame Unwind Recovery")
+
+    elif args.command == "trace-diff":
+        from dataclasses import asdict
+        from reverse_forge.trace_diff_engine import TraceDiffEngine, TraceStep
+        base_steps = [
+            TraceStep(address=int(x.strip(), 16) if x.strip().startswith("0x") else int(x.strip(), 10))
+            for x in args.base_addrs.split(",") if x.strip()
+        ]
+        div_steps = [
+            TraceStep(address=int(x.strip(), 16) if x.strip().startswith("0x") else int(x.strip(), 10))
+            for x in args.div_addrs.split(",") if x.strip()
+        ]
+        rep = TraceDiffEngine().align_and_diff_traces(base_steps, div_steps)
+        _write_or_print(asdict(rep), args.output, "Differential Execution Trace Alignment")
 
 
 if __name__ == "__main__":

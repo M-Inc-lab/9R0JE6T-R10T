@@ -231,8 +231,15 @@ class PipelineStateMachine:
             self.static_metadata = {"entropy": PEAnalyzer.calculate_entropy(self.binary_bytes)}
 
         from reverse_forge.signature_engine import SignatureEngine
+        from reverse_forge.cpp_rtti_engine import CppRTTIEngine
         sig_scan = SignatureEngine().full_signature_scan(self.binary_bytes)
         self.static_metadata["signature_scan"] = sig_scan
+
+        rtti_rep = CppRTTIEngine().analyze_binary_rtti(
+            self.binary_bytes,
+            symbol_list=self.static_metadata.get("imported_symbols", []) + self.static_metadata.get("exported_symbols", []),
+        )
+        self.static_metadata["cpp_rtti_classes_recovered"] = rtti_rep.total_classes_recovered
         prologues = sig_scan["stripped_function_recovery"]["estimated_function_prologues_total"]
         sig_hits = sig_scan["total_signature_matches"]
 
