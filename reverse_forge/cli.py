@@ -302,6 +302,22 @@ def main():
     cc_p.add_argument("--workers", type=int, default=4, help="Worker thread count")
     cc_p.add_argument("--output", "-o", help="Optional path to write JSON cluster report")
 
+    # ssa-optimize (Phase 32: Cytron SSA Lifter & Algebraic Optimizer over UnifiedIL)
+    ssa_p = subparsers.add_parser("ssa-optimize", help="Lift assembly to UnifiedIL SSA form and run constant/copy/DSE passes")
+    ssa_p.add_argument("--arch", default="x64", choices=["x86", "x64", "arm64", "aarch64", "mips"], help="Source architecture")
+    ssa_p.add_argument("--asm", required=True, help="Semicolon-separated assembly instructions")
+    ssa_p.add_argument("--output", "-o", help="Optional path to write JSON SSA report")
+
+    # structure-cfg (Phase 33: Pattern-Independent Region-Based Control-Flow Structurer)
+    scfg_p = subparsers.add_parser("structure-cfg", help="Recover goto-free structured C (if/else, loops, switch) using post-dominators")
+    scfg_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    scfg_p.add_argument("--output", "-o", help="Optional path to write structured C report")
+
+    # vsa-analyze (Phase 34: Declarative Datalog Fact Engine & Value-Set Analysis)
+    vsa_p = subparsers.add_parser("vsa-analyze", help="Run Datalog fixed-point inference and Value-Set Analysis (strided intervals)")
+    vsa_p.add_argument("--asm", required=True, help="Semicolon-separated assembly instructions")
+    vsa_p.add_argument("--output", "-o", help="Optional path to write JSON VSA report")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -715,11 +731,12 @@ def main():
             "MicroDecompilerEngine", "PointerAliasEngine", "MicrocodeOptimizer",
             "ConcolicPathPruner", "FineGrainedTaintTracker", "UnifiedILLifter",
             "AntiInjectionGuard", "ZeroDayClusterEngine", "PatchVerifier",
-            "DistributedCorpusClusteringEngine",
+            "DistributedCorpusClusteringEngine", "SSALifterAndOptimizer",
+            "ControlFlowRegionStructurer", "DatalogVSAEngine",
         ]
         report = {
-            "version": "3.0.0-complete",
-            "phases_implemented": 30,
+            "version": "4.0.0-apex",
+            "phases_implemented": 35,
             "internal_engines_count": len(internal_engines),
             "internal_engines_status": "ALL_READY",
             "external_toolchains": {
@@ -882,6 +899,63 @@ def main():
         engine = DistributedCorpusClusteringEngine(max_workers=args.workers)
         report = engine.scan_and_cluster_directory(args.dir)
         _write_or_print(asdict(report), args.output, "Distributed Corpus Clustering")
+
+    elif args.command == "ssa-optimize":
+        from dataclasses import asdict
+        from reverse_forge.unified_il_lifter import UnifiedILLifter
+        from reverse_forge.ssa_lifter import SSABasicBlock, SSALifterAndOptimizer
+        lifter = UnifiedILLifter(target_arch=args.arch)
+        parsed_insns = []
+        for raw_stmt in args.asm.split(";"):
+            stmt = raw_stmt.strip()
+            if not stmt:
+                continue
+            parts = stmt.split(None, 1)
+            mnem = parts[0]
+            ops = [op.strip() for op in parts[1].split(",")] if len(parts) > 1 else []
+            parsed_insns.append((mnem, ops))
+        uil_list = lifter.lift_block(parsed_insns)
+        raw_blocks = {0: SSABasicBlock(block_id=0, instructions=uil_list)}
+        opt_report = SSALifterAndOptimizer().optimize_ssa_blocks(raw_blocks, entry_id=0)
+        _write_or_print(asdict(opt_report), args.output, "SSA Optimization Report")
+
+    elif args.command == "structure-cfg":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.decompiler_engine import MicroDecompilerEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        base_va = entry_va or 0x401000
+        decomp = MicroDecompilerEngine()
+        dfunc = decomp.decompile_raw_bytes(code_slice, base_addr=base_va)
+        insns = decomp._fallback_decode_x86(code_slice, base_va)
+        struct_rep = decomp.decompile_structured(insns, func_name="entry_structured")
+        _write_or_print(asdict(struct_rep), args.output, "Region-Structured Decompilation")
+
+    elif args.command == "vsa-analyze":
+        from dataclasses import asdict
+        from reverse_forge.datalog_vsa_engine import DatalogVSAEngine
+        insns = []
+        addr = 0x401000
+        for raw_stmt in args.asm.split(";"):
+            stmt = raw_stmt.strip()
+            if not stmt:
+                continue
+            parts = stmt.split(None, 1)
+            mnem = parts[0]
+            op_str = parts[1].strip() if len(parts) > 1 else ""
+            insns.append((addr, mnem, op_str))
+            addr += 4
+        vsa_rep = DatalogVSAEngine().analyze_instruction_facts(insns)
+        _write_or_print(asdict(vsa_rep), args.output, "Datalog & Value-Set Analysis")
 
 
 if __name__ == "__main__":

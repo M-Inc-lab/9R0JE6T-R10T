@@ -277,3 +277,14 @@ class MicroDecompilerEngine:
 
         blocks = self.build_cfg(instructions)
         return self.decompile_cfg_to_c("sub_" + hex(base_addr)[2:], base_addr, blocks)
+
+    def decompile_structured(self, instructions: List[Tuple[int, str, str]], func_name: str = "sub_structured"):
+        """
+        Phase 33: Build CFG and run pattern-independent post-dominator region structuring
+        (recovering goto-free if/else, natural loops, short-circuit &&/||, and switches).
+        """
+        from reverse_forge.region_structurer import ControlFlowRegionStructurer
+        cfg = self.build_cfg(instructions)
+        structurer = ControlFlowRegionStructurer()
+        return structurer.structure_cfg(cfg, func_name=func_name)
+

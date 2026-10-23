@@ -273,12 +273,18 @@ class PipelineStateMachine:
         r2_funcs = self.correlation_results.get("tool_radare2", {}).get("functions_count", 0)
         cs_insns = len(self.correlation_results.get("tool_capstone", {}).get("disassembled_instructions", []))
 
-        # Native micro-decompilation at resolved entry-point file offset
+        # Native micro-decompilation + Phase 33 Region Structuring + Phase 34 Datalog/VSA sweep
         from reverse_forge.decompiler_engine import MicroDecompilerEngine
+        from reverse_forge.datalog_vsa_engine import DatalogVSAEngine
         decompiler = MicroDecompilerEngine()
         code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(self.binary_bytes, self.static_metadata)
-        native_decomp = decompiler.decompile_raw_bytes(code_slice, base_addr=entry_va or 0x401000)
+        base_va = entry_va or 0x401000
+        native_decomp = decompiler.decompile_raw_bytes(code_slice, base_addr=base_va)
         self.static_metadata["native_decompiled_c"] = native_decomp.c_source
+
+        vsa_engine = DatalogVSAEngine()
+        swept_funcs = vsa_engine.sweep_executable_section(code_slice, base_addr=base_va)
+        self.static_metadata["vsa_discovered_functions"] = [hex(a) for a in swept_funcs[:64]]
 
         summary = (
             f"Disassembly: Capstone ({cs_insns} insns) / Radare2 ({r2_funcs} funcs). "

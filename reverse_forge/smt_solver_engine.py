@@ -22,6 +22,14 @@ class PathConstraint:
 
 
 @dataclass
+class RelationalConstraint:
+    lhs_var: str
+    op: str
+    rhs_var: str
+    rhs_offset: int = 0
+
+
+@dataclass
 class SMTSolveResult:
     status: str     # SAT, UNSAT, UNKNOWN
     is_feasible: bool
@@ -209,3 +217,86 @@ class SMTSolverEngine:
             "solver_backend": over_res.solver_backend,
             "explanation": f"Path constraints strictly bound '{length_var}' within [0, {buffer_capacity}].",
         }
+
+    def verify_modular_wrap_and_relational_guards(
+        self,
+        path_constraints: List[PathConstraint],
+        relational_constraints: Optional[List[RelationalConstraint]] = None,
+        length_var: str = "input_len",
+        added_header_size: int = 0,
+        buffer_capacity: int = 512,
+        bit_width: int = 64,
+    ) -> Dict[str, Any]:
+        """
+        Phase 35: 64-bit Modular Bit-Vector & Two-Variable Relational Guard Verification.
+        Detects CWE-190 integer wraparound where `(length_var + added_header_size) <= buffer_capacity`
+        is checked in modular 2^bit_width arithmetic without checking `length_var <= buffer_capacity`,
+        allowing `length_var = 2^bit_width - added_header_size` to wrap around to 0!
+        """
+        modulus = 1 << bit_width
+        max_uint = modulus - 1
+
+        # 1. Check 64-bit modular addition wrap-around (CWE-190 -> CWE-122)
+        if added_header_size > 0:
+            wrap_candidate = modulus - added_header_size
+            # Check if path_constraints forbid unsigned values near 2^bit_width
+            has_strict_upper_bound = False
+            for c in path_constraints:
+                if c.var == length_var and c.op.upper() in ("LT", "LE") and c.value <= buffer_capacity:
+                    has_strict_upper_bound = True
+                    break
+            if not has_strict_upper_bound:
+                wrapped_sum = (wrap_candidate + added_header_size) % modulus
+                if wrapped_sum <= buffer_capacity:
+                    return {
+                        "guard_status": "MODULAR_WRAP_VULNERABLE",
+                        "cwe_id": "CWE-190",
+                        "bit_width": bit_width,
+                        "counterexample": {
+                            length_var: wrap_candidate,
+                            "wrapped_allocation_size": wrapped_sum,
+                        },
+                        "explanation": (
+                            f"{bit_width}-bit modular addition ({length_var} + {added_header_size}) wraps around "
+                            f"at {length_var}=0x{wrap_candidate:x} to {wrapped_sum} <= {buffer_capacity} (CWE-190 -> CWE-122)."
+                        ),
+                    }
+
+        # 2. Evaluate two-variable relational constraints (e.g., idx < buf_cap)
+        if relational_constraints:
+            var_bounds: Dict[str, List[int]] = {}
+            for c in path_constraints:
+                lo, hi = var_bounds.get(c.var, [0, buffer_capacity * 2])
+                if c.op == "GE":
+                    lo = max(lo, c.value)
+                elif c.op == "GT":
+                    lo = max(lo, c.value + 1)
+                elif c.op == "LE":
+                    hi = min(hi, c.value)
+                elif c.op == "LT":
+                    hi = min(hi, c.value - 1)
+                elif c.op == "EQ":
+                    lo, hi = c.value, c.value
+                var_bounds[c.var] = [lo, hi]
+
+            for rc in relational_constraints:
+                rhs_lo, rhs_hi = var_bounds.get(rc.rhs_var, [0, buffer_capacity])
+                lhs_lo, lhs_hi = var_bounds.get(rc.lhs_var, [0, buffer_capacity * 2])
+                if rc.op == "LT":
+                    lhs_hi = min(lhs_hi, rhs_hi + rc.rhs_offset - 1)
+                elif rc.op == "LE":
+                    lhs_hi = min(lhs_hi, rhs_hi + rc.rhs_offset)
+                var_bounds[rc.lhs_var] = [lhs_lo, lhs_hi]
+
+            final_lo, final_hi = var_bounds.get(length_var, [0, buffer_capacity * 2])
+            if final_hi <= buffer_capacity and final_lo >= 0:
+                return {
+                    "guard_status": "GUARD_COMPLETE_RELATIONAL",
+                    "cwe_id": None,
+                    "bit_width": bit_width,
+                    "counterexample": {},
+                    "explanation": f"Relational constraints bound '{length_var}' within [{final_lo}, {final_hi}] <= {buffer_capacity}.",
+                }
+
+        return self.verify_guard_completeness(path_constraints, length_var, buffer_capacity)
+

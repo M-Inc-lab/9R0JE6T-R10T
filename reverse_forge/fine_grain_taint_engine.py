@@ -28,6 +28,13 @@ class TaintSinkViolation:
     trace_log: List[str] = field(default_factory=list)
 
 
+@dataclass
+class FunctionTaintSummary:
+    function_name: str
+    param_to_return_taint: Set[int] = field(default_factory=set)
+    param_to_sink_violations: Dict[int, List[Tuple[str, str, str]]] = field(default_factory=dict)
+
+
 class FineGrainedTaintTracker:
     """
     Performs instruction-level taint propagation across registers and abstract memory cells.
@@ -277,3 +284,190 @@ class FineGrainedTaintTracker:
         for mem, (tag, src) in self.mem_taint.items():
             active[f"Mem:{mem}"] = f"{tag.name} (from {src})"
         return active
+
+    ARG_REGS_ARM64 = ["x0", "x1", "x2", "x3", "x4", "x5"]
+    ARG_REGS_MIPS = ["a0", "a1", "a2", "a3"]
+
+    def _arg_regs_for_arch(self) -> List[str]:
+        if self.calling_convention in ("arm64", "aarch64"):
+            return self.ARG_REGS_ARM64
+        if self.calling_convention in ("mips", "mips32", "mips64"):
+            return self.ARG_REGS_MIPS
+        if self.calling_convention == "win64":
+            return self.ARG_REGS_WIN64
+        return self.ARG_REGS_AMD64
+
+    def _ret_reg_for_arch(self) -> str:
+        if self.calling_convention in ("arm64", "aarch64"):
+            return "x0"
+        if self.calling_convention in ("mips", "mips32", "mips64"):
+            return "v0"
+        return "rax"
+
+    def step_uil_instruction(
+        self,
+        uil_ins: Any,
+        function_summaries: Optional[Dict[str, "FunctionTaintSummary"]] = None,
+    ) -> Optional[TaintSinkViolation]:
+        """
+        Phase 34: Architecture-agnostic taint propagation directly over UnifiedIL (UILInstruction)
+        for x86/x64, ARM64, and MIPS32, with interprocedural function summary application.
+        """
+        op = uil_ins.opcode.upper()
+        dst = (uil_ins.dest or "").strip()
+        s1 = (uil_ins.src1 or "").strip()
+        s2 = (uil_ins.src2 or "").strip()
+        raw = uil_ins.raw_assembly or f"{op} {dst}, {s1}, {s2}"
+
+        if op == "ASSIGN" and dst:
+            canon_dst = self._canonical_reg(dst)
+            t1, orig1 = self.get_taint(s1) if s1 else (TaintTag.CLEAN, "")
+            if t1 != TaintTag.CLEAN:
+                self.reg_taint[canon_dst] = (t1, orig1)
+                self.trace_log.append(f"UIL_ASSIGN: {s1} -> Reg[{canon_dst}] ({t1.name})")
+            else:
+                self.clear_taint(canon_dst)
+            return None
+
+        if op == "LOAD" and dst and s1:
+            mem_key = self._normalize_mem_expr(f"[{self._canonical_reg(s1)}+{uil_ins.offset}]")
+            t_mem, orig_mem = self.mem_taint.get(mem_key, (TaintTag.CLEAN, ""))
+            if t_mem == TaintTag.CLEAN:
+                t_mem, orig_mem = self.get_taint(s1)
+            canon_dst = self._canonical_reg(dst)
+            if t_mem != TaintTag.CLEAN:
+                self.reg_taint[canon_dst] = (t_mem, orig_mem)
+                self.trace_log.append(f"UIL_LOAD: {mem_key} -> Reg[{canon_dst}] ({t_mem.name})")
+            else:
+                self.clear_taint(canon_dst)
+            return None
+
+        if op == "STORE" and dst and s1:
+            mem_key = self._normalize_mem_expr(f"[{self._canonical_reg(dst)}+{uil_ins.offset}]")
+            t_src, orig_src = self.get_taint(s1)
+            if t_src != TaintTag.CLEAN:
+                self.mem_taint[mem_key] = (t_src, orig_src)
+                self.trace_log.append(f"UIL_STORE: Reg[{s1}] -> {mem_key} ({t_src.name})")
+            else:
+                self.mem_taint.pop(mem_key, None)
+            return None
+
+        if op in ("ADD", "SUB", "MUL", "AND", "OR", "XOR", "SHL", "SHR") and dst:
+            canon_dst = self._canonical_reg(dst)
+            if op == "XOR" and s1 and s2 and self._canonical_reg(s1) == self._canonical_reg(s2):
+                self.clear_taint(canon_dst)
+                return None
+            t1, o1 = self.get_taint(s1) if s1 else (TaintTag.CLEAN, "")
+            t2, o2 = self.get_taint(s2) if s2 else (TaintTag.CLEAN, "")
+            if t1 != TaintTag.CLEAN or t2 != TaintTag.CLEAN:
+                dom_tag = max(t1, t2)
+                orig = o1 or o2
+                self.reg_taint[canon_dst] = (dom_tag, orig)
+                self.trace_log.append(f"UIL_{op}: ({s1}, {s2}) -> Reg[{canon_dst}] ({dom_tag.name})")
+            else:
+                self.clear_taint(canon_dst)
+            return None
+
+        if op == "CALL" and dst:
+            target_fn = dst.lstrip("_@")
+            arg_regs = self._arg_regs_for_arch()
+            ret_reg = self._ret_reg_for_arch()
+
+            # 1. Direct sink check
+            if target_fn in self.SINK_RULES:
+                for param_idx, (cwe, v_name) in self.SINK_RULES[target_fn].items():
+                    if param_idx < len(arg_regs):
+                        r_name = arg_regs[param_idx]
+                        tag, origin = self.get_taint(r_name)
+                        if tag != TaintTag.CLEAN:
+                            return TaintSinkViolation(
+                                sink_name=target_fn,
+                                violation_type=v_name,
+                                cwe_id=cwe,
+                                trigger_instruction=raw,
+                                tainted_operand=r_name,
+                                taint_source=origin,
+                                taint_tag_name=tag.name,
+                                trace_log=list(self.trace_log),
+                            )
+
+            # 2. Interprocedural summary application
+            if function_summaries and target_fn in function_summaries:
+                summary = function_summaries[target_fn]
+                for p_idx, sink_list in summary.param_to_sink_violations.items():
+                    if p_idx < len(arg_regs):
+                        r_name = arg_regs[p_idx]
+                        tag, origin = self.get_taint(r_name)
+                        if tag != TaintTag.CLEAN and sink_list:
+                            sink_fn, cwe, v_name = sink_list[0]
+                            return TaintSinkViolation(
+                                sink_name=f"{target_fn}->{sink_fn}",
+                                violation_type=f"INTERPROCEDURAL_{v_name}",
+                                cwe_id=cwe,
+                                trigger_instruction=raw,
+                                tainted_operand=r_name,
+                                taint_source=origin,
+                                taint_tag_name=tag.name,
+                                trace_log=list(self.trace_log),
+                            )
+                for p_idx in summary.param_to_return_taint:
+                    if p_idx < len(arg_regs):
+                        r_name = arg_regs[p_idx]
+                        tag, origin = self.get_taint(r_name)
+                        if tag != TaintTag.CLEAN:
+                            self.reg_taint[self._canonical_reg(ret_reg)] = (tag, f"{origin} via {target_fn}")
+                            self.trace_log.append(f"UIL_SUMMARY_RET: {target_fn} propagated param {p_idx} ({r_name}) -> {ret_reg}")
+
+            # 3. Taint sources
+            if target_fn in ("recv", "read", "fgets", "fread", "WSARecv", "scanf", "getenv"):
+                self.reg_taint[self._canonical_reg(ret_reg)] = (TaintTag.TAINTED_INPUT, target_fn)
+                if len(arg_regs) >= 2 and target_fn in ("recv", "read"):
+                    self.reg_taint[self._canonical_reg(arg_regs[1])] = (TaintTag.TAINTED_INPUT, target_fn)
+
+        return None
+
+    def analyze_uil_stream(
+        self,
+        uil_instructions: List[Any],
+        function_summaries: Optional[Dict[str, "FunctionTaintSummary"]] = None,
+    ) -> List[TaintSinkViolation]:
+        """Run architecture-agnostic taint tracking across a list of UILInstruction objects."""
+        violations: List[TaintSinkViolation] = []
+        for ins in uil_instructions:
+            v = self.step_uil_instruction(ins, function_summaries=function_summaries)
+            if v:
+                violations.append(v)
+        return violations
+
+    @classmethod
+    def compute_function_summary(
+        cls,
+        func_name: str,
+        uil_instructions: List[Any],
+        calling_convention: str = "amd64",
+        existing_summaries: Optional[Dict[str, "FunctionTaintSummary"]] = None,
+    ) -> "FunctionTaintSummary":
+        """
+        Phase 34: Bottom-up interprocedural summary generator.
+        Tests each parameter register (0..3) with symbolic taint to determine whether
+        it reaches the function's return register or triggers an internal security sink.
+        """
+        summary = FunctionTaintSummary(function_name=func_name)
+        probe_tracker = cls(calling_convention=calling_convention)
+        arg_regs = probe_tracker._arg_regs_for_arch()
+        ret_reg = probe_tracker._canonical_reg(probe_tracker._ret_reg_for_arch())
+
+        for p_idx in range(min(4, len(arg_regs))):
+            t = cls(calling_convention=calling_convention)
+            t.mark_tainted(arg_regs[p_idx], TaintTag.TAINTED_INPUT, f"param_{p_idx}")
+            viols = t.analyze_uil_stream(uil_instructions, function_summaries=existing_summaries)
+            if viols:
+                summary.param_to_sink_violations[p_idx] = [
+                    (v.sink_name, v.cwe_id, v.violation_type) for v in viols
+                ]
+            ret_tag, _ = t.get_taint(ret_reg)
+            if ret_tag != TaintTag.CLEAN:
+                summary.param_to_return_taint.add(p_idx)
+
+        return summary
+

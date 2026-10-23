@@ -133,3 +133,13 @@ class MicrocodeOptimizer:
             synthesized.append(lines[i])
             i += 1
         return synthesized
+
+    def optimize_uil_ssa(self, raw_blocks, entry_id: int = 0):
+        """
+        Phase 32: Lift UnifiedIL basic blocks into Cytron SSA form with explicit PHI nodes
+        and execute def-use constant folding, copy propagation, and dead-store elimination.
+        """
+        from reverse_forge.ssa_lifter import SSALifterAndOptimizer
+        optimizer = SSALifterAndOptimizer()
+        return optimizer.optimize_ssa_blocks(raw_blocks, entry_id)
+
