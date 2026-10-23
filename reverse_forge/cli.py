@@ -236,6 +236,20 @@ def main():
     sbom_p.add_argument("--output", "-o", help="Path to write CycloneDX v1.5 SBOM JSON")
     sbom_p.add_argument("--sarif", help="Optional path to write OASIS SARIF v2.1.0 JSON")
 
+    # batch-scan (Recursive directory / firmware corpus scanner + SQLite indexing)
+    batch_p = subparsers.add_parser("batch-scan", help="Recursively scan directory of binaries and index findings in SQLite")
+    batch_p.add_argument("--dir", "-d", required=True, help="Target directory or extracted firmware root")
+    batch_p.add_argument("--db", default="reverse_forge_kb.sqlite", help="SQLite knowledge base file path")
+    batch_p.add_argument("--max-files", type=int, default=50, help="Maximum binaries to analyze in batch")
+    batch_p.add_argument("--output", "-o", help="Path to write JSON corpus rollup")
+
+    # db-query (Query indexed artifacts and findings from SQLite KB)
+    dbq_p = subparsers.add_parser("db-query", help="Query indexed findings from the SQLite Artifact Knowledge Base")
+    dbq_p.add_argument("--db", default="reverse_forge_kb.sqlite", help="SQLite knowledge base file path")
+    dbq_p.add_argument("--cwe", default=None, help="Filter findings by CWE ID (e.g. CWE-120)")
+    dbq_p.add_argument("--min-cvss", type=float, default=0.0, help="Minimum CVSS 4.0 score filter")
+    dbq_p.add_argument("--output", "-o", help="Path to write JSON query results")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -582,6 +596,28 @@ def main():
                 json.dump(sarif_doc, sf, indent=2)
             print(f"[+] SARIF v2.1.0 report written to {args.sarif}")
         _write_or_print(sbom_doc, args.output, "CycloneDX v1.5 SBOM")
+
+    elif args.command == "batch-scan":
+        if not os.path.isdir(args.dir):
+            sys.exit(f"Error: Directory not found: {args.dir}")
+        from reverse_forge.corpus_db import ArtifactKnowledgeBase, BatchCorpusScanner
+        kb = ArtifactKnowledgeBase(args.db)
+        scanner = BatchCorpusScanner(kb=kb)
+        res = scanner.scan_directory(args.dir, max_files=args.max_files)
+        _write_or_print(res, args.output, "Batch Corpus Scan")
+
+    elif args.command == "db-query":
+        _require_existing_file(args.db)
+        from reverse_forge.corpus_db import ArtifactKnowledgeBase
+        kb = ArtifactKnowledgeBase(args.db)
+        matches = kb.query_findings(cwe_id=args.cwe, min_cvss=args.min_cvss)
+        res = {
+            "database": os.path.abspath(args.db),
+            "filters": {"cwe": args.cwe, "min_cvss": args.min_cvss},
+            "matches_count": len(matches),
+            "findings": matches,
+        }
+        _write_or_print(res, args.output, "Knowledge Base Query")
 
 
 if __name__ == "__main__":
