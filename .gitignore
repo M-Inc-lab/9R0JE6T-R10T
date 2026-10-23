@@ -5,3 +5,7 @@ __pycache__/
 .ipynb_checkpoints/
 .reverse_forge_workspace/
 .extracted_layers/
+
+# Patch archives
+*.zip
+reverse_forge_v1_complete_all_phases.zip

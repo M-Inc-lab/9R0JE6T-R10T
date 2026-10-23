@@ -104,3 +104,36 @@ class SemanticRecoveryEngine:
             evidence_apis=matched_apis,
             recovered_struct_fields=struct_fields,
         )
+
+    def propagate_struct_types_across_callgraph(
+        self,
+        callgraph: Dict[str, List[str]],
+        recovered_funcs: Dict[str, RecoveredFunctionSymbol]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Bidirectional type propagation:
+        If Callee accesses struct fields via argument pointer, propagate that struct layout
+        backward to the Caller's variable passed at the call site.
+        """
+        inferred_types: Dict[str, List[Dict[str, Any]]] = {}
+
+        for caller, callees in callgraph.items():
+            for callee in callees:
+                callee_meta = recovered_funcs.get(callee)
+                if callee_meta and callee_meta.recovered_struct_fields:
+                    # Callee expects a structured type! Propagate to caller
+                    inferred_types.setdefault(caller, []).extend(callee_meta.recovered_struct_fields)
+
+        # Deduplicate and sort
+        for func_name in inferred_types:
+            unique_fields = []
+            seen = set()
+            for fld in inferred_types[func_name]:
+                k = (fld["offset"], fld["inferred_type"])
+                if k not in seen:
+                    seen.add(k)
+                    unique_fields.append(fld)
+            unique_fields.sort(key=lambda x: int(x["offset"], 16))
+            inferred_types[func_name] = unique_fields
+
+        return inferred_types

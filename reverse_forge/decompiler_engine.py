@@ -200,10 +200,15 @@ class MicroDecompilerEngine:
         c_lines.append("    return result;")
         c_lines.append("}")
 
+        # Pass through Microcode AST Optimization Pipeline
+        from reverse_forge.microcode_optimizer import MicrocodeOptimizer
+        opt = MicrocodeOptimizer()
+        optimized_lines = opt.run_optimization_pipeline(c_lines)
+
         return DecompiledFunction(
             name=func_name,
             entry_addr=entry_addr,
-            c_source="\n".join(c_lines),
+            c_source="\n".join(optimized_lines),
             total_blocks=len(blocks),
             local_variables=sorted(list(locals_set)),
             call_sites=call_sites,
