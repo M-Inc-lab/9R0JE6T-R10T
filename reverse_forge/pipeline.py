@@ -418,22 +418,29 @@ class PipelineStateMachine:
             return True
 
         from reverse_forge.windows_sandbox import WindowsSandbox
+        from reverse_forge.posix_sandbox import POSIXSandboxEngine
+        from reverse_forge.frida_dbi_engine import FridaDBIEngine
+
         wsb = WindowsSandbox(self.provenance.working_copy_path)
         wsb_profile = os.path.join(self.provenance_mgr.workspace_root, "detonation_profile.wsb")
         wsb.generate_wsb_profile(wsb_profile)
-        
-        # Staging automated telemetry collector script & Frida DBI hook script
+
         ps1_collector = os.path.join(self.provenance_mgr.workspace_root, "collect_telemetry.ps1")
         WindowsSandbox.generate_telemetry_collector_script(ps1_collector, self.provenance.artifact_name)
 
-        from reverse_forge.frida_dbi_engine import FridaDBIEngine
+        posix_runner = os.path.join(self.provenance_mgr.workspace_root, "posix_isolated_runner.sh")
+        POSIXSandboxEngine(self.provenance.working_copy_path).generate_isolated_runner_script(posix_runner)
+
         frida_js = os.path.join(self.provenance_mgr.workspace_root, "frida_telemetry.js")
         hook_syms = [s for s in self.static_metadata.get("imported_symbols", [])[:15] if re.match(r"^[A-Za-z0-9_]+$", str(s))]
         if not hook_syms:
             hook_syms = ["main", "recv", "strcpy"]
         FridaDBIEngine.write_frida_script(frida_js, hook_syms)
 
-        summary = f"Generated sandbox profile, PowerShell trace collector, and Frida DBI script ({len(hook_syms)} hooks)"
+        summary = (
+            f"Generated Windows (.wsb/PS1) & Linux/POSIX (bwrap/strace) isolation runners "
+            f"plus Frida DBI script ({len(hook_syms)} hooks)"
+        )
         self._mark_stage(7, StageStatus.COMPLETED, summary=summary)
         return True
 
