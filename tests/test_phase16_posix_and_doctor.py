@@ -65,9 +65,9 @@ Program received signal SIGSEGV, Segmentation fault.
         )
         self.assertEqual(res.returncode, 0, f"CLI doctor failed: {res.stderr}")
         doc = json.loads(res.stdout)
-        self.assertEqual(doc["phases_implemented"], 16)
+        self.assertEqual(doc["phases_implemented"], 30)
         self.assertEqual(doc["internal_engines_status"], "ALL_READY")
-        self.assertEqual(doc["internal_engines_count"], 25)
+        self.assertEqual(doc["internal_engines_count"], 35)
 
 
 if __name__ == "__main__":

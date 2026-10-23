@@ -273,16 +273,11 @@ class PipelineStateMachine:
         r2_funcs = self.correlation_results.get("tool_radare2", {}).get("functions_count", 0)
         cs_insns = len(self.correlation_results.get("tool_capstone", {}).get("disassembled_instructions", []))
 
-        # Native micro-decompilation fallback
+        # Native micro-decompilation at resolved entry-point file offset
         from reverse_forge.decompiler_engine import MicroDecompilerEngine
         decompiler = MicroDecompilerEngine()
-        entry_pt = self.static_metadata.get("entry_point", 0x401000)
-        if isinstance(entry_pt, str):
-            try:
-                entry_pt = int(entry_pt, 16)
-            except ValueError:
-                entry_pt = 0x401000
-        native_decomp = decompiler.decompile_raw_bytes(self.binary_bytes[:4096], base_addr=entry_pt)
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(self.binary_bytes, self.static_metadata)
+        native_decomp = decompiler.decompile_raw_bytes(code_slice, base_addr=entry_va or 0x401000)
         self.static_metadata["native_decompiled_c"] = native_decomp.c_source
 
         summary = (
@@ -340,18 +335,38 @@ class PipelineStateMachine:
                 remediation=f"Sanitize data from `{flow.source_name}` before invoking `{flow.sink_name}`."
             ))
 
-        # 3. Interprocedural pointer alias & heap lifecycle analysis
+        # 3. Interprocedural pointer alias & heap lifecycle analysis over decompiled pseudocode
         from reverse_forge.pointer_alias_engine import PointerAliasEngine
         pae = PointerAliasEngine()
-        # Scan extracted strings / symbols for heap memory patterns
-        sym_names = [str(s).lstrip("_") for s in self.static_metadata.get("imported_symbols", [])]
-        mock_ops = []
-        if "malloc" in sym_names:
-            mock_ops.append(("0x4010", "CALL", "buf = malloc(64)"))
-        if "free" in sym_names:
-            mock_ops.append(("0x4020", "CALL", "free(buf)"))
-        if mock_ops:
-            pae.analyze_instruction_sequence(mock_ops)
+        for dfn in decomp_list:
+            c_text = dfn.get("pseudocode", "") if isinstance(dfn, dict) else ""
+            fn_label = dfn.get("function", "func") if isinstance(dfn, dict) else "func"
+            seq = []
+            for idx, line in enumerate(c_text.splitlines()):
+                st = line.strip().rstrip(";")
+                if "malloc(" in st or "calloc(" in st:
+                    seq.append((f"{fn_label}:{idx}", "CALL", st))
+                elif "free(" in st:
+                    seq.append((f"{fn_label}:{idx}", "CALL", st))
+            if seq:
+                pae.analyze_instruction_sequence(seq)
+        for defect in pae.defects:
+            self.report_generator.add_finding(Finding(
+                finding_id=f"HEAP-{defect.defect_type}",
+                title=f"Heap Lifecycle Defect: {defect.defect_type} on `{defect.pointer_var}`",
+                vulnerability_class="Memory Lifecycle & Aliasing",
+                confidence="Probable",
+                cvss_score=defect.cvss_score,
+                cwe_id=defect.cwe,
+                function_symbol=defect.pointer_var,
+                address_or_offset=defect.trigger_site,
+                what=defect.description,
+                why="Pointer continues to be referenced or freed again after deallocation.",
+                where=f"Allocated at {defect.alloc_site}, triggered at {defect.trigger_site}",
+                when="Dynamic heap management",
+                how="Dangling pointer alias is dereferenced or passed to free() twice.",
+                remediation="Nullify pointers immediately after free (`ptr = NULL;`) and enforce single-ownership smart pointers.",
+            ))
 
         summary = f"Ghidra status: {self.ghidra_results.get('status')}. Decompiled: {decomp_count}. Taint paths: {len(flows)}"
         self._mark_stage(5, StageStatus.COMPLETED, summary=summary)

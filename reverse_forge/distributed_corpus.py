@@ -57,13 +57,39 @@ class DistributedCorpusClusteringEngine:
             sha256 = hashlib.sha256(data).hexdigest()
             fmt = self.correlation.identify_format(data)
 
-            # Extract basic metric vector
-            simulated_code = [
-                f"mov [rdi+{i}], al" for i in range(min(10, len(data) // 64))
-            ] + ["ret"]
+            # Extract real structural metadata and disassemble entry point slice
+            from reverse_forge.pe_analyzer import PEAnalyzer
+            from reverse_forge.elf_analyzer import ELFAnalyzer
+            from reverse_forge.macho_analyzer import MachOAnalyzer
+            from reverse_forge.decompiler_engine import MicroDecompilerEngine
+
+            if fmt == "PE":
+                meta = PEAnalyzer(data).analyze()
+            elif fmt == "ELF":
+                meta = ELFAnalyzer(data).analyze()
+            elif fmt == "Mach-O":
+                meta = MachOAnalyzer(data).analyze()
+            else:
+                meta = {}
+
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+            decomp = MicroDecompilerEngine()
+            # Decode real entry instructions
+            ins_tuples = []
+            try:
+                import capstone
+                md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+                for insn in md.disasm(code_slice, entry_va):
+                    ins_tuples.append(f"{insn.mnemonic} {insn.op_str}".strip())
+            except Exception:
+                dfunc = decomp.decompile_raw_bytes(code_slice, base_addr=entry_va or 0x401000)
+                ins_tuples = [line.strip() for line in dfunc.c_source.splitlines() if line.strip()]
+
+            called_syms = {str(s).lstrip("_") for s in meta.get("imported_symbols", [])}
             vec = self.zeroday.extract_function_metrics(
                 func_name="entry",
-                instructions=simulated_code,
+                instructions=ins_tuples or ["nop", "ret"],
+                called_functions=called_syms,
             )
 
             # Detect format family

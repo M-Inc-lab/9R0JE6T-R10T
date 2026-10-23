@@ -71,16 +71,18 @@ class MicroDecompilerEngine:
         blocks: Dict[int, BasicBlock] = {}
         curr_block: Optional[BasicBlock] = None
 
-        # 2. Populate basic blocks
+        # 2. Populate basic blocks in O(N) time
+        prev_addr = instructions[0][0]
         for addr, mnem, op_str in instructions:
             if addr in block_starts:
-                if curr_block:
-                    curr_block.end_addr = instructions[instructions.index((addr, mnem, op_str)) - 1][0]
+                if curr_block is not None:
+                    curr_block.end_addr = prev_addr
                 curr_block = BasicBlock(start_addr=addr, end_addr=addr)
                 blocks[addr] = curr_block
             if curr_block is not None:
                 curr_block.instructions.append((addr, mnem, op_str))
                 curr_block.end_addr = addr
+            prev_addr = addr
 
         # 3. Connect control-flow edges
         for b_addr, b in blocks.items():
@@ -229,10 +231,49 @@ class MicroDecompilerEngine:
             for insn in md.disasm(code_bytes, base_addr):
                 instructions.append((insn.address, insn.mnemonic, insn.op_str))
         except Exception:
-            # Fallback trivial instruction decoder
-            for i in range(0, len(code_bytes), 4):
-                addr = base_addr + i
-                instructions.append((addr, "nop", ""))
+            # Lightweight pure-Python x86/x64 byte-Opcode decoder fallback
+            idx = 0
+            limit = min(len(code_bytes), 256)
+            while idx < limit:
+                addr = base_addr + idx
+                b0 = code_bytes[idx]
+                if code_bytes[idx:idx + 4] == b"\xf3\x0f\x1e\xfa":
+                    instructions.append((addr, "endbr64", ""))
+                    idx += 4
+                elif b0 == 0x55:
+                    instructions.append((addr, "push", "rbp"))
+                    idx += 1
+                elif b0 == 0x5D:
+                    instructions.append((addr, "pop", "rbp"))
+                    idx += 1
+                elif code_bytes[idx:idx + 3] in (b"\x48\x89\xe5", b"\x89\xe5"):
+                    step = 3 if code_bytes[idx] == 0x48 else 2
+                    instructions.append((addr, "mov", "rbp, rsp"))
+                    idx += step
+                elif code_bytes[idx:idx + 2] == b"\x31\xc0":
+                    instructions.append((addr, "xor", "eax, eax"))
+                    idx += 2
+                elif b0 in (0xC3, 0xCB):
+                    instructions.append((addr, "ret", ""))
+                    break
+                elif b0 == 0xE8 and idx + 5 <= limit:
+                    rel = int.from_bytes(code_bytes[idx + 1:idx + 5], "little", signed=True)
+                    target = (addr + 5 + rel) & 0xFFFFFFFFFFFFFFFF
+                    instructions.append((addr, "call", hex(target)))
+                    idx += 5
+                elif b0 == 0xEB and idx + 2 <= limit:
+                    rel = int.from_bytes(code_bytes[idx + 1:idx + 2], "little", signed=True)
+                    instructions.append((addr, "jmp", hex(addr + 2 + rel)))
+                    idx += 2
+                elif 0x70 <= b0 <= 0x7F and idx + 2 <= limit:
+                    rel = int.from_bytes(code_bytes[idx + 1:idx + 2], "little", signed=True)
+                    jcc_map = {0x74: "je", 0x75: "jne", 0x7C: "jl", 0x7D: "jge", 0x7E: "jle", 0x7F: "jg"}
+                    mn = jcc_map.get(b0, "jne")
+                    instructions.append((addr, mn, hex(addr + 2 + rel)))
+                    idx += 2
+                else:
+                    instructions.append((addr, "nop", ""))
+                    idx += 1
 
         blocks = self.build_cfg(instructions)
         return self.decompile_cfg_to_c("sub_" + hex(base_addr)[2:], base_addr, blocks)

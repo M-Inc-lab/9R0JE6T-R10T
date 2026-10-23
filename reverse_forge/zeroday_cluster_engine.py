@@ -54,10 +54,16 @@ class ZeroDayClusterEngine:
         clean_lines = [l.strip() for l in instructions if l.strip() and not l.strip().startswith((";", "#"))]
         total_ins = max(1, len(clean_lines))
 
-        # 1. Cyclomatic complexity estimate
+        # 1. Cyclomatic complexity estimate using exact branch mnemonics
+        branch_mnemonics = {
+            "jmp", "je", "jne", "jz", "jnz", "jg", "jge", "jl", "jle",
+            "ja", "jae", "jb", "jbe", "js", "jns", "jo", "jno",
+            "b", "bl", "br", "blr", "beq", "bne", "bgt", "blt", "bge", "ble",
+            "cbz", "cbnz", "tbz", "tbnz", "ret", "retn",
+        }
         branch_count = sum(
             1 for l in clean_lines
-            if any(l.lower().startswith(b) for b in ("j", "b", "ret"))
+            if l.split()[0].lower().split(".")[0] in branch_mnemonics
         )
         cyclomatic = max(1, branch_count + 1)
 

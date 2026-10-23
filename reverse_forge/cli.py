@@ -271,6 +271,37 @@ def main():
     alias_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
     alias_p.add_argument("--output", "-o", help="Optional path to write JSON memory defect analysis")
 
+    # uil-lift (Cross-architecture Unified IL lifter for x86/x64, ARM64, MIPS)
+    uil_p = subparsers.add_parser("uil-lift", help="Lift assembly instructions into platform-independent Unified IL (UIL)")
+    uil_p.add_argument("--arch", default="x64", choices=["x86", "x64", "arm64", "aarch64", "mips"], help="Source architecture")
+    uil_p.add_argument("--asm", required=True, help="Semicolon-separated assembly instructions (e.g. 'mov rax, [rbp-0x10]; ret')")
+    uil_p.add_argument("--output", "-o", help="Optional path to write JSON UIL output")
+
+    # taint-trace (Fine-grained register & memory instruction taint tracker)
+    tt_p = subparsers.add_parser("taint-trace", help="Run instruction-level register and memory taint tracking")
+    tt_p.add_argument("--taint-reg", default="rdx", help="Initial register to mark tainted")
+    tt_p.add_argument("--asm", required=True, help="Semicolon-separated assembly trace (e.g. 'mov rsi, rdx; call memcpy')")
+    tt_p.add_argument("--output", "-o", help="Optional path to write JSON taint violations")
+
+    # zeroday-scan (Heuristic zero-day anomaly clustering)
+    zd_p = subparsers.add_parser("zeroday-scan", help="Score binary entry/functions for zero-day heuristic anomalies")
+    zd_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    zd_p.add_argument("--threshold", type=float, default=0.50, help="Anomaly score threshold in [0.0, 1.0]")
+    zd_p.add_argument("--output", "-o", help="Optional path to write JSON anomaly report")
+
+    # patch-verify (Automated defensive patch resilience & C/Python harness verifier)
+    pv_p = subparsers.add_parser("patch-verify", help="Verify defensive patch resilience and generate C/Python test harnesses")
+    pv_p.add_argument("--cwe", required=True, help="Target CWE ID (e.g. CWE-120, CWE-78)")
+    pv_p.add_argument("--symbol", default="parse_packet", help="Target function symbol name")
+    pv_p.add_argument("--capacity", type=int, default=256, help="Target buffer capacity in bytes")
+    pv_p.add_argument("--output", "-o", help="Optional path to write JSON verification report")
+
+    # corpus-cluster (Multi-threaded distributed binary corpus clustering)
+    cc_p = subparsers.add_parser("corpus-cluster", help="Concurrently profile and cluster a directory of binaries into families")
+    cc_p.add_argument("--dir", "-d", required=True, help="Target corpus directory")
+    cc_p.add_argument("--workers", type=int, default=4, help="Worker thread count")
+    cc_p.add_argument("--output", "-o", help="Optional path to write JSON cluster report")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -681,10 +712,14 @@ def main():
             "POSIXSandboxEngine", "FridaDBIEngine", "BehavioralTelemetryEngine",
             "PipelineStateMachine", "ReportGenerator", "DashboardGenerator",
             "SARIFExporter", "CycloneDXExporter", "ArtifactKnowledgeBase",
+            "MicroDecompilerEngine", "PointerAliasEngine", "MicrocodeOptimizer",
+            "ConcolicPathPruner", "FineGrainedTaintTracker", "UnifiedILLifter",
+            "AntiInjectionGuard", "ZeroDayClusterEngine", "PatchVerifier",
+            "DistributedCorpusClusteringEngine",
         ]
         report = {
-            "version": "2.6.0-complete",
-            "phases_implemented": 16,
+            "version": "3.0.0-complete",
+            "phases_implemented": 30,
             "internal_engines_count": len(internal_engines),
             "internal_engines_status": "ALL_READY",
             "external_toolchains": {
@@ -705,8 +740,17 @@ def main():
         from reverse_forge.decompiler_engine import MicroDecompilerEngine
         with open(args.input, "rb") as f:
             data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, resolved_entry = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        base_addr = resolved_entry if resolved_entry else args.entry
         decompiler = MicroDecompilerEngine()
-        res = decompiler.decompile_raw_bytes(data[:8192], base_addr=args.entry)
+        res = decompiler.decompile_raw_bytes(code_slice, base_addr=base_addr)
         if args.output:
             with open(args.output, "w", encoding="utf-8") as f:
                 f.write(res.c_source)
@@ -717,14 +761,23 @@ def main():
     elif args.command == "alias-trace":
         _require_existing_file(args.input)
         from reverse_forge.pointer_alias_engine import PointerAliasEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            ELFAnalyzer(data).analyze() if fmt == "ELF"
+            else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {})
+        )
+        imported = [str(s).lstrip("_") for s in meta.get("imported_symbols", [])]
         pae = PointerAliasEngine()
-        # Scan symbols or provide linear memory lifecycle inspection
-        pae.record_allocation("ptr1", "0x401010", size_expr="64")
-        pae.record_alias("alias_ptr", "ptr1")
-        pae.record_free("ptr1", "0x401050")
-        pae.record_dereference("alias_ptr", "0x401060", is_write=True)
+        alloc_imports = sorted(set(imported) & pae.ALLOC_FUNCTIONS)
+        free_imports = sorted(set(imported) & pae.FREE_FUNCTIONS)
         report = {
             "artifact": os.path.abspath(args.input),
+            "detected_format": fmt,
+            "allocator_imports": alloc_imports,
+            "deallocator_imports": free_imports,
             "total_defects_found": len(pae.defects),
             "defects": [
                 {
@@ -734,12 +787,101 @@ def main():
                     "alloc_site": d.alloc_site,
                     "trigger_site": d.trigger_site,
                     "description": d.description,
-                    "cvss_score": d.cvss_score
+                    "cvss_score": d.cvss_score,
                 }
                 for d in pae.defects
-            ]
+            ],
         }
         _write_or_print(report, args.output, "Pointer & Heap Alias Analysis")
+
+    elif args.command == "uil-lift":
+        from dataclasses import asdict
+        from reverse_forge.unified_il_lifter import UnifiedILLifter
+        lifter = UnifiedILLifter(target_arch=args.arch)
+        parsed_insns = []
+        for raw_stmt in args.asm.split(";"):
+            stmt = raw_stmt.strip()
+            if not stmt:
+                continue
+            parts = stmt.split(None, 1)
+            mnem = parts[0]
+            ops = [op.strip() for op in parts[1].split(",")] if len(parts) > 1 else []
+            parsed_insns.append((mnem, ops))
+        lifted = lifter.lift_block(parsed_insns)
+        _write_or_print({"arch": args.arch, "instructions": [asdict(i) for i in lifted]}, args.output, "Unified IL Lift")
+
+    elif args.command == "taint-trace":
+        from dataclasses import asdict
+        from reverse_forge.fine_grain_taint_engine import FineGrainedTaintTracker, TaintTag
+        tracker = FineGrainedTaintTracker()
+        tracker.mark_tainted(args.taint_reg, TaintTag.TAINTED_INPUT, "cli_taint_seed")
+        parsed_insns = []
+        for raw_stmt in args.asm.split(";"):
+            stmt = raw_stmt.strip()
+            if not stmt:
+                continue
+            parts = stmt.split(None, 1)
+            mnem = parts[0]
+            ops = [op.strip() for op in parts[1].split(",")] if len(parts) > 1 else []
+            parsed_insns.append((mnem, ops))
+        violations = tracker.analyze_linear_trace(parsed_insns)
+        _write_or_print(
+            {
+                "active_taints": tracker.get_active_taints(),
+                "violations_count": len(violations),
+                "violations": [asdict(v) for v in violations],
+            },
+            args.output,
+            "Fine-Grained Taint Trace",
+        )
+
+    elif args.command == "zeroday-scan":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.zeroday_cluster_engine import ZeroDayClusterEngine
+        from reverse_forge.decompiler_engine import MicroDecompilerEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        dfunc = MicroDecompilerEngine().decompile_raw_bytes(code_slice, base_addr=entry_va or 0x401000)
+        called = {str(s).lstrip("_") for s in meta.get("imported_symbols", [])}
+        zd = ZeroDayClusterEngine(anomaly_threshold=args.threshold)
+        vec = zd.extract_function_metrics("entry", dfunc.c_source.splitlines(), called_functions=called)
+        cands = zd.analyze_functions({"entry": dfunc.c_source.splitlines()}, call_graph={"entry": called})
+        _write_or_print(
+            {
+                "artifact": os.path.abspath(args.input),
+                "entry_metrics": asdict(vec),
+                "candidates": [asdict(c) for c in cands],
+            },
+            args.output,
+            "Zero-Day Heuristic Scan",
+        )
+
+    elif args.command == "patch-verify":
+        from dataclasses import asdict
+        from reverse_forge.remediation_engine import RemediationEngine
+        from reverse_forge.patch_verifier import PatchVerifier
+        rem = RemediationEngine()
+        patch = rem.generate_defensive_patch(f"VULN-{args.cwe}", args.cwe, args.symbol)
+        report = PatchVerifier().verify_patch_resilience(patch, buffer_capacity=args.capacity)
+        _write_or_print(asdict(report), args.output, "Defensive Patch Verification")
+
+    elif args.command == "corpus-cluster":
+        if not os.path.isdir(args.dir):
+            sys.exit(f"Error: Directory not found: {args.dir}")
+        from dataclasses import asdict
+        from reverse_forge.distributed_corpus import DistributedCorpusClusteringEngine
+        engine = DistributedCorpusClusteringEngine(max_workers=args.workers)
+        report = engine.scan_and_cluster_directory(args.dir)
+        _write_or_print(asdict(report), args.output, "Distributed Corpus Clustering")
 
 
 if __name__ == "__main__":

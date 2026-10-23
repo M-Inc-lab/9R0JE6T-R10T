@@ -83,6 +83,9 @@ class PatchVerifier:
 int test_exploit_payload_rejection() {{
     char dest[BUFFER_CAPACITY] = {{0}};
     char exploit_src[{exploit_len}];
+    const char *src = exploit_src;
+    const char *user_supplied_format = exploit_src;
+    char * const safe_argv[] = {{ "/bin/true", NULL }};
     memset(exploit_src, 'A', sizeof(exploit_src) - 1);
     exploit_src[sizeof(exploit_src) - 1] = '\\0';
 
@@ -97,6 +100,9 @@ int test_exploit_payload_rejection() {{
 int test_benign_input_acceptance() {{
     char dest[BUFFER_CAPACITY] = {{0}};
     char benign_src[{benign_len}] = "Safe payload input";
+    const char *src = benign_src;
+    const char *user_supplied_format = benign_src;
+    char * const safe_argv[] = {{ "/bin/true", NULL }};
 
     {hardened}
 

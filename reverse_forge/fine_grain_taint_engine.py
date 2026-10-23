@@ -97,6 +97,10 @@ class FineGrainedTaintTracker:
         cleaned = reg_name.strip().lower().lstrip("%$")
         return self.REG_ALIASES.get(cleaned, cleaned)
 
+    @staticmethod
+    def _canonical_mem(mem_expr: str) -> str:
+        return "".join(mem_expr.strip("[]* ").split()).lower()
+
     def mark_tainted(
         self,
         target: str,
@@ -105,7 +109,7 @@ class FineGrainedTaintTracker:
     ) -> None:
         """Explicitly inject a taint marker into a register or memory location."""
         if target.startswith("[") or target.startswith("*"):
-            clean_loc = target.strip("[]* ")
+            clean_loc = self._canonical_mem(target)
             self.mem_taint[clean_loc] = (tag, source)
             self.trace_log.append(f"TAINT_INJECT: Mem[{clean_loc}] marked as {tag.name} from {source}")
         else:
@@ -114,6 +118,12 @@ class FineGrainedTaintTracker:
             self.trace_log.append(f"TAINT_INJECT: Reg[{canon}] marked as {tag.name} from {source}")
 
     def clear_taint(self, target: str) -> None:
+        if target.startswith("[") or target.startswith("*"):
+            clean_loc = self._canonical_mem(target)
+            if clean_loc in self.mem_taint:
+                del self.mem_taint[clean_loc]
+                self.trace_log.append(f"TAINT_CLEAR: Mem[{clean_loc}] cleared")
+            return
         canon = self._canonical_reg(target)
         if canon in self.reg_taint:
             del self.reg_taint[canon]
@@ -122,7 +132,7 @@ class FineGrainedTaintTracker:
     def get_taint(self, operand: str) -> Tuple[TaintTag, str]:
         cleaned = operand.strip()
         if cleaned.startswith("[") or cleaned.startswith("*"):
-            loc = cleaned.strip("[]* ")
+            loc = self._canonical_mem(cleaned)
             return self.mem_taint.get(loc, (TaintTag.CLEAN, ""))
         canon = self._canonical_reg(cleaned)
         return self.reg_taint.get(canon, (TaintTag.CLEAN, ""))
@@ -154,7 +164,7 @@ class FineGrainedTaintTracker:
             src_tag, src_origin = self.get_taint(src_str)
             if src_tag != TaintTag.CLEAN:
                 if dst_str.startswith("["):
-                    mem_loc = dst_str.strip("[] ")
+                    mem_loc = self._canonical_mem(dst_str)
                     self.mem_taint[mem_loc] = (src_tag, src_origin)
                     self.trace_log.append(f"TAINT_PROPAGATE: {src_str} -> Mem[{mem_loc}] ({src_tag.name})")
                 else:
@@ -162,9 +172,8 @@ class FineGrainedTaintTracker:
                     self.reg_taint[canon_dst] = (src_tag, src_origin)
                     self.trace_log.append(f"TAINT_PROPAGATE: {src_str} -> Reg[{canon_dst}] ({src_tag.name})")
             else:
-                # Clean source overwrites destination
-                if not dst_str.startswith("["):
-                    self.clear_taint(dst_str)
+                # Clean source overwrites destination register or memory cell
+                self.clear_taint(dst_str)
             return None
 
         # 3. Pointer calculation: lea reg, [base + off]
