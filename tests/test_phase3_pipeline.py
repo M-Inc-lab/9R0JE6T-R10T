@@ -92,6 +92,9 @@ class TestPhase3PipelineStateMachine(unittest.TestCase):
 
     def test_full_pipeline_on_elf_binary(self):
         if os.path.exists("/bin/ls"):
+            with open("/bin/ls", "rb") as f:
+                if f.read(4) != b"\x7fELF":
+                    return
             sm = PipelineStateMachine(
                 artifact_path="/bin/ls",
                 autonomy_level=AutonomyLevel.AUTONOMOUS,

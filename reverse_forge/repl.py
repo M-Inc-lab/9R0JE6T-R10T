@@ -241,9 +241,9 @@ class Spinner:
 
     def stop(self, ok: bool = True) -> None:
         self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=2)
-        icon = _green("✔") if ok else _red("✖")
+        ok_sym = "+" if sys.platform == "win32" else "✔"
+        err_sym = "x" if sys.platform == "win32" else "✖"
+        icon = _green(ok_sym) if ok else _red(err_sym)
         sys.stdout.write(f"\r{icon} {self._label}  \n")
         sys.stdout.flush()
 
@@ -407,7 +407,8 @@ class Session:
             self.target_path = expanded
             self.target_intel = intel
             caps = self.target_intel.detect_capabilities()
-            print(f"\n  {_green('✔ Loaded active target:')} {_bold(os.path.basename(expanded))}")
+            ok_sym = "[+]" if sys.platform == "win32" else "✔"
+            print(f"\n  {_green(f'{ok_sym} Loaded active target:')} {_bold(os.path.basename(expanded))}")
             print(f"    {_dim('Path:')}         {expanded}")
             print(f"    {_dim('Format/Arch:')}  {_cyan(self.target_intel.format_name)} ({self.target_intel.metadata.get('architecture', 'unknown')})")
             print(f"    {_dim('Size:')}         {len(data):,} bytes  ·  Entropy: {self.target_intel.metadata.get('entropy', 0.0)}")
@@ -433,7 +434,9 @@ class Session:
     def status_line(self) -> str:
         last = "—"
         if self.last_command:
-            icon = _green("✔") if self.last_ok else _red("✖")
+            ok_sym = "+" if sys.platform == "win32" else "✔"
+            err_sym = "x" if sys.platform == "win32" else "✖"
+            icon = _green(ok_sym) if self.last_ok else _red(err_sym)
             last = f"{icon} {self.last_command}"
         t_label = f"{self.target_path} ({self.target_intel.format_name})" if self.target_path and self.target_intel else "None (run 'load <file>')"
         return (

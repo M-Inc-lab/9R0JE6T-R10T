@@ -78,6 +78,9 @@ class TestPhase14SARIFAndSBOM(unittest.TestCase):
 
     def test_end_to_end_pipeline_sarif_and_sbom_on_ls(self):
         if os.path.exists("/bin/ls"):
+            with open("/bin/ls", "rb") as f:
+                if f.read(4) != b"\x7fELF":
+                    return
             with tempfile.TemporaryDirectory() as tmpdir:
                 sm = PipelineStateMachine("/bin/ls", autonomy_level=AutonomyLevel.AUTONOMOUS, workspace_dir=tmpdir)
                 state = sm.run_all()

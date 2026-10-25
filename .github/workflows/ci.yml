@@ -37,12 +37,14 @@ jobs:
       - name: Run full unit & security regression suite
         env:
           PYTHONPATH: ${{ github.workspace }}
+          PYTHONUTF8: "1"
         run: |
           python -m unittest discover -s tests -v
 
       - name: Run CLI smoke checks
         env:
           PYTHONPATH: ${{ github.workspace }}
+          PYTHONUTF8: "1"
         run: |
           python -m reverse_forge.cli detect-tools
           python -m reverse_forge.cli remediate --cwe CWE-120 --symbol parse_input
