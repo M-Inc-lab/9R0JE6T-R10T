@@ -4,15 +4,33 @@ Recursively scans directories or extracted firmware filesystems for executable a
 executes the 12-stage pipeline, and indexes all findings and hashes into a local SQLite database.
 """
 
-import contextlib
 import json
 import os
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Iterator
+from typing import Any, Dict, List, Optional
 
 from reverse_forge.correlation_engine import CorrelationEngine
 from reverse_forge.pipeline import AutonomyLevel, PipelineStateMachine
+
+
+class ManagedConnection(sqlite3.Connection):
+    """SQLite connection subclass that auto-closes on context exit unless persistent."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.persistent: bool = False
+
+    def __enter__(self) -> "ManagedConnection":
+        super().__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Optional[bool]:
+        try:
+            return super().__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            if not self.persistent:
+                self.close()
 
 
 class ArtifactKnowledgeBase:
@@ -20,17 +38,37 @@ class ArtifactKnowledgeBase:
 
     def __init__(self, db_path: str = "reverse_forge_kb.sqlite"):
         self.db_path = os.path.abspath(db_path)
+        self._conn: Optional[ManagedConnection] = None
         self._init_schema()
 
-    @contextlib.contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+    def _connect(self) -> sqlite3.Connection:
+        if self._conn is not None:
+            return self._conn
+        conn = sqlite3.connect(self.db_path, factory=ManagedConnection)
         conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        return conn
+
+    def close(self) -> None:
+        """Close any cached or persistent database connection."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def __enter__(self) -> "ArtifactKnowledgeBase":
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path, factory=ManagedConnection)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.persistent = True
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
@@ -271,3 +309,18 @@ class BatchCorpusScanner:
         summary["last_batch_scanned_count"] = len(scanned)
         summary["last_batch_skipped_non_binary"] = skipped
         return summary
+
+    def close(self) -> None:
+        """Close underlying knowledge base connection if initialized."""
+        if self.kb:
+            self.kb.close()
+
+    def __enter__(self) -> "BatchCorpusScanner":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
+

@@ -79,6 +79,27 @@ class TestPhase15CorpusAndKnowledgeBase(unittest.TestCase):
             self.assertEqual(summary["total_indexed_artifacts"], 1)
             self.assertEqual(len(kb.query_findings()), 1)
 
+    def test_context_manager_and_clean_connection(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "ctx_test.sqlite")
+            with ArtifactKnowledgeBase(db_path) as kb:
+                conn = kb._connect()
+                self.assertIsInstance(conn, sqlite3.Connection)
+                summary = kb.get_corpus_summary()
+                self.assertEqual(summary["total_indexed_artifacts"], 0)
+
+            # Explicit close test
+            kb2 = ArtifactKnowledgeBase(db_path)
+            conn2 = kb2._connect()
+            self.assertIsInstance(conn2, sqlite3.Connection)
+            kb2.close()
+
+            # Scanner context manager
+            with BatchCorpusScanner(kb=ArtifactKnowledgeBase(db_path)) as scanner:
+                self.assertIsNotNone(scanner.kb)
+
 
 if __name__ == "__main__":
     unittest.main()
+
