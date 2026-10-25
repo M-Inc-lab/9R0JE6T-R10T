@@ -49,6 +49,7 @@ class TestPhase15CorpusAndKnowledgeBase(unittest.TestCase):
             # Query findings by CWE-119
             cwe119_hits = kb.query_findings(cwe_id="CWE-119", min_cvss=5.0)
             self.assertGreaterEqual(len(cwe119_hits), 1)
+            kb.close()
 
     def test_idempotent_upsert_on_same_sha256(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -78,6 +79,7 @@ class TestPhase15CorpusAndKnowledgeBase(unittest.TestCase):
             summary = kb.get_corpus_summary()
             self.assertEqual(summary["total_indexed_artifacts"], 1)
             self.assertEqual(len(kb.query_findings()), 1)
+            kb.close()
 
     def test_context_manager_and_clean_connection(self):
         import sqlite3

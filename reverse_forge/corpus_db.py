@@ -4,6 +4,8 @@ Recursively scans directories or extracted firmware filesystems for executable a
 executes the 12-stage pipeline, and indexes all findings and hashes into a local SQLite database.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sqlite3
@@ -14,64 +16,31 @@ from reverse_forge.correlation_engine import CorrelationEngine
 from reverse_forge.pipeline import AutonomyLevel, PipelineStateMachine
 
 
-class ManagedConnection(sqlite3.Connection):
-    """SQLite connection subclass that auto-closes on context exit unless persistent."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.persistent: bool = False
-        self.is_closed: bool = False
-
-    def close(self) -> None:
-        self.is_closed = True
-        try:
-            super().close()
-        except Exception:
-            pass
-
-    def __enter__(self) -> "ManagedConnection":
-        super().__enter__()
-        return self
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Optional[bool]:
-        try:
-            return super().__exit__(exc_type, exc_val, exc_tb)
-        finally:
-            if not self.persistent:
-                self.close()
-
-
 class ArtifactKnowledgeBase:
     """Persistent SQLite storage for analyzed artifacts, hashes, and CWE/CVSS findings."""
 
     def __init__(self, db_path: str = "reverse_forge_kb.sqlite"):
         self.db_path = os.path.abspath(db_path)
-        self._conn: Optional[ManagedConnection] = None
+        self._conn: Optional[sqlite3.Connection] = None
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        if self._conn is not None and not self._conn.is_closed:
-            return self._conn
-        conn = sqlite3.connect(self.db_path, factory=ManagedConnection)
-        conn.row_factory = sqlite3.Row
-        self._conn = conn
-        return conn
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path)
+            self._conn.row_factory = sqlite3.Row
+        return self._conn
 
     def close(self) -> None:
         """Close any cached or persistent database connection."""
         if self._conn is not None:
-            if not self._conn.is_closed:
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
+            try:
+                self._conn.close()
+            except Exception:
+                pass
             self._conn = None
 
-    def __enter__(self) -> "ArtifactKnowledgeBase":
-        if self._conn is None or self._conn.is_closed:
-            self._conn = sqlite3.connect(self.db_path, factory=ManagedConnection)
-            self._conn.row_factory = sqlite3.Row
-        self._conn.persistent = True
+    def __enter__(self) -> ArtifactKnowledgeBase:
+        self._connect()
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -325,7 +294,7 @@ class BatchCorpusScanner:
         if self.kb:
             self.kb.close()
 
-    def __enter__(self) -> "BatchCorpusScanner":
+    def __enter__(self) -> BatchCorpusScanner:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
