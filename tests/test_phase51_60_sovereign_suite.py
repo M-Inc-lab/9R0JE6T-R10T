@@ -308,8 +308,10 @@ class TestPhase60AdversarialFuzzingAndSovereignMatrix(unittest.TestCase):
     """
 
     def test_cli_doctor_reports_60_phases_and_62_engines(self):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         proc = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "doctor"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         doc = json.loads(proc.stdout)

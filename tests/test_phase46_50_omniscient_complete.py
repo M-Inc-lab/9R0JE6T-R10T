@@ -171,8 +171,10 @@ class TestPhase50ProjectWorkspaceDBAndOmniscientCLI(unittest.TestCase):
 
     def test_v8_omniscient_cli_doctor_and_subcommands(self):
         """Verify cli.py doctor reports 50 phases / 52 engines (v8.0.0-omniscient) and new CLI commands work."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         doc = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "doctor"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         doc_json = json.loads(doc.stdout)
@@ -187,6 +189,7 @@ class TestPhase50ProjectWorkspaceDBAndOmniscientCLI(unittest.TestCase):
                 "--rename", "0x401000=parse_auth_token",
                 "--comment", "0x401000=Token verifier",
             ],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         self.assertIn("parse_auth_token", px.stdout)

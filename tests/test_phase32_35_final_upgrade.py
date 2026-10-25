@@ -7,6 +7,7 @@ Unit tests for Phases 32–35 (v4.0 Apex Final Upgrade):
 """
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -246,8 +247,10 @@ class TestPhase35ModularWrapAndRelationalSMT(unittest.TestCase):
 
     def test_phase32_to_35_cli_commands_and_doctor(self):
         """Verify cli.py doctor reports 35 phases / 38 engines and ssa-optimize / vsa-analyze work."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         doc = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "doctor"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         doc_json = json.loads(doc.stdout)
@@ -256,12 +259,14 @@ class TestPhase35ModularWrapAndRelationalSMT(unittest.TestCase):
 
         ssa_run = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "ssa-optimize", "--asm", "mov rcx, 5; add rcx, 10; ret"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         self.assertIn("constants_propagated", ssa_run.stdout)
 
         vsa_run = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "vsa-analyze", "--asm", "mov rax, 16; add rax, 32; ret"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         self.assertIn("register_value_sets", vsa_run.stdout)

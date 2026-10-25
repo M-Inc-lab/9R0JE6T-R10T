@@ -173,6 +173,7 @@ class TestPhase45DesktopAppAndCLISubcommands(unittest.TestCase):
             self.assertEqual(len(model.sections), 2)
             self.assertTrue(len(model.hex_lines) > 0)
 
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             for subcmd, extra in [
                 ("dossier", []),
                 ("capabilities", []),
@@ -183,6 +184,7 @@ class TestPhase45DesktopAppAndCLISubcommands(unittest.TestCase):
             ]:
                 proc = subprocess.run(
                     [sys.executable, "-m", "reverse_forge.cli", subcmd, "-i", tmp_path] + extra,
+                    cwd=repo_root,
                     capture_output=True, text=True, check=True,
                 )
                 out_json = json.loads(proc.stdout)

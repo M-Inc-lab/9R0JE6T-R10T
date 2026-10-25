@@ -209,8 +209,10 @@ class TestPhase69To70LiveWebPatchingPersistentDebuggerAndEternalCLI(unittest.Tes
             httpd.server_close()
 
     def test_eternal_cli_doctor_and_vuln_scan(self):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         proc = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "doctor"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         doc = json.loads(proc.stdout)
@@ -225,6 +227,7 @@ class TestPhase69To70LiveWebPatchingPersistentDebuggerAndEternalCLI(unittest.Tes
         try:
             v_proc = subprocess.run(
                 [sys.executable, "-m", "reverse_forge.cli", "vuln-scan", "-i", tmp_path],
+                cwd=repo_root,
                 capture_output=True, text=True, check=True,
             )
             v_out = json.loads(v_proc.stdout)
@@ -260,8 +263,10 @@ class TestPhase69To70LiveWebPatchingPersistentDebuggerAndEternalCLI(unittest.Tes
         self.assertEqual(unsat_res.status, "UNSAT")
 
         # Verify cli.py doctor reports z3: true
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         doc_proc = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "doctor"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         doc_data = json.loads(doc_proc.stdout)

@@ -160,8 +160,10 @@ class TestPhase63To65WebUploadAnnotateAndZenithCLI(unittest.TestCase):
 
     def test_zenith_cli_doctor_and_decompile_full(self):
         """Verify cli.py doctor reports 10.0.0-zenith (65 phases / 63 engines) and decompile-full works."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         doc = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "doctor"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         doc_json = json.loads(doc.stdout)
@@ -175,6 +177,7 @@ class TestPhase63To65WebUploadAnnotateAndZenithCLI(unittest.TestCase):
             create_minimal_pe_binary(tmp_path)
             df = subprocess.run(
                 [sys.executable, "-m", "reverse_forge.cli", "decompile-full", "-i", tmp_path],
+                cwd=repo_root,
                 capture_output=True, text=True, check=True,
             )
             df_json = json.loads(df.stdout)

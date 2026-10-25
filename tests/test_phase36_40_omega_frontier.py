@@ -8,6 +8,7 @@ Unit tests for Phases 36–40 (v5.0-omega Frontier Expansion):
 """
 
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -182,8 +183,10 @@ class TestPhase40TraceDiffEngineAndOmegaCLI(unittest.TestCase):
 
     def test_phase36_to_40_cli_commands_and_doctor_40_phases(self):
         """Verify cli.py doctor reports 40 phases / 43 engines and new v5.0 CLI commands work."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         doc = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "doctor"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         doc_json = json.loads(doc.stdout)
@@ -193,6 +196,7 @@ class TestPhase40TraceDiffEngineAndOmegaCLI(unittest.TestCase):
 
         mba_run = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "deobfuscate-mba", "--expr", "(x ^ y) + 2 * (x & y)"],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         self.assertIn("x + y", mba_run.stdout)
@@ -203,6 +207,7 @@ class TestPhase40TraceDiffEngineAndOmegaCLI(unittest.TestCase):
                 "--base-addrs", "0x401000,0x401004,0x401020",
                 "--div-addrs", "0x401000,0x401004,0x401099",
             ],
+            cwd=repo_root,
             capture_output=True, text=True, check=True,
         )
         self.assertIn("divergence_point_address", td_run.stdout)
