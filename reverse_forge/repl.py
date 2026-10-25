@@ -1,6 +1,6 @@
 """
 R3V3R53//F0RG3  Interactive REPL — Stateful Cross-Platform TUI Workbench (v7.0)
-===============================================================================
+==============================================================================
 A polished, stateful interactive reverse-engineering shell wrapping all 54
 subcommands of the reverse_forge CLI plus instant target-aware workspace commands:
   - `load <file>` / `use <file>` — Load a binary once into the session context
@@ -242,7 +242,7 @@ class Spinner:
 
 
 BANNER = r"""
- ╔══════════════════════════════════════════════════════════════════════╗
+ ╔═══════════════════════════════════════════════════════════════��[...]
  ║   ██████╗ ██████╗ ██╗   ██╗██████╗ ██████╗ ██████╗ ██████╗           ║
  ║   ██╔══██╗╚════██╗██║   ██║╚════██╗██╔══██╗╚════██╗╚════██╗          ║
  ║   ██████╔╝ █████╔╝██║   ██║ █████╔╝██████╔╝ █████╔╝ █████╔╝          ║
@@ -252,8 +252,8 @@ BANNER = r"""
  ║            ╔═╗╔═╗╦═╗╔═╗╔═╗  //  F0RG3  v7.0.0-singularity            ║
  ║            ╠╣ ║ ║╠╦╝║ ╦║╣                                            ║
  ║            ╚  ╚═╝╩╚═╚═╝╚═╝  47 Engines · 54 Commands · Stateful TUI  ║
- ╚══════════════════════════════════════════════════════════════════════╝
-"""
+ ╚═══════════════════════════════════════════════════════════════��[...]
+ """
 
 
 def _print_banner() -> None:
@@ -264,7 +264,7 @@ def _print_banner() -> None:
             line = _magenta(line) if ("██" in line or "═╗" in line or "═╝" in line) else _blue(line)
         print(line)
     print()
-    print(f"  {_dim('Quickstart:')} {_green('load <file>')} {_dim('→')} {_cyan('info')} {_dim('·')} {_cyan('caps')} {_dim('·')} {_cyan('xrefs')} {_dim('·')} {_cyan('ask network')} {_dim('·')} {_cyan('inspect 0x0')}")
+    print(f"  {_dim('Quickstart:')} {_green('load <file>')} {_dim('→')} {_cyan('info')} {_dim('·')} {_cyan('caps')} {_dim('·')} {_cyan('xrefs')} {_dim('·')} {_cyan('ask network')} {_dim('·')}")
     print(f"  {_dim('Type')} {_cyan('groups')} {_dim('for all 54 categorized commands ·')} {_cyan('exit')} {_dim('to quit')}")
     print()
 
@@ -378,19 +378,31 @@ class Session:
         if not os.path.exists(expanded) or not os.path.isfile(expanded):
             print(f"  {_red('Error:')} File not found: {expanded}")
             return False
-        from reverse_forge.binary_intel_engine import BinaryIntelEngine
-        with open(expanded, "rb") as f:
-            data = f.read()
-        self.target_path = expanded
-        self.target_intel = BinaryIntelEngine(data, filepath=expanded)
-        caps = self.target_intel.detect_capabilities()
-        print(f"\n  {_green('✔ Loaded active target:')} {_bold(os.path.basename(expanded))}")
-        print(f"    {_dim('Path:')}         {expanded}")
-        print(f"    {_dim('Format/Arch:')}  {_cyan(self.target_intel.format_name)} ({self.target_intel.metadata.get('architecture', 'unknown')})")
-        print(f"    {_dim('Size:')}         {len(data):,} bytes  ·  Entropy: {self.target_intel.metadata.get('entropy', 0.0)}")
-        print(f"    {_dim('Entry Point:')}  {_yellow(str(self.target_intel.metadata.get('entry_point', '0x0')))}")
-        print(f"    {_dim('Capabilities:')} {len(caps)} behavioral capability match(es) detected\n")
-        return True
+
+        try:
+            from reverse_forge.binary_intel_engine import BinaryIntelEngine
+            with open(expanded, "rb") as f:
+                data = f.read()
+
+            intel = BinaryIntelEngine(data, filepath=expanded)
+            if not isinstance(getattr(intel, "metadata", None), dict):
+                raise ValueError("BinaryIntelEngine did not produce valid metadata")
+
+            self.target_path = expanded
+            self.target_intel = intel
+            caps = self.target_intel.detect_capabilities()
+            print(f"\n  {_green('✔ Loaded active target:')} {_bold(os.path.basename(expanded))}")
+            print(f"    {_dim('Path:')}         {expanded}")
+            print(f"    {_dim('Format/Arch:')}  {_cyan(self.target_intel.format_name)} ({self.target_intel.metadata.get('architecture', 'unknown')})")
+            print(f"    {_dim('Size:')}         {len(data):,} bytes  ·  Entropy: {self.target_intel.metadata.get('entropy', 0.0)}")
+            print(f"    {_dim('Entry Point:')}  {_yellow(str(self.target_intel.metadata.get('entry_point', '0x0')))}")
+            print(f"    {_dim('Capabilities:')} {len(caps)} behavioral capability match(es) detected\n")
+            return True
+        except Exception as exc:
+            self.target_path = None
+            self.target_intel = None
+            print(f"  {_red('Error:')} Could not load binary: {exc}")
+            return False
 
     def elapsed(self) -> str:
         s = int(time.time() - self.start_time)
