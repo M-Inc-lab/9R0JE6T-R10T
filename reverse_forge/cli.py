@@ -396,6 +396,92 @@ def main():
     app_p.add_argument("--mode", choices=["tk", "app-window", "headless-json"], default="tk", help="Desktop UI mode")
     app_p.add_argument("--output", "-o", help="Optional output file when running in headless-json mode")
 
+    # floss-strings (Phase 46: FLOSS-Style Stack & XOR/ADD Obfuscated String Solver)
+    fls_p = subparsers.add_parser("floss-strings", help="Recover stack-constructed strings and XOR/ADD obfuscated strings")
+    fls_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    fls_p.add_argument("--min-len", type=int, default=4, help="Minimum string length")
+    fls_p.add_argument("--output", "-o", help="Optional path to write JSON deobfuscated string report")
+
+    # compiler-profile (Phase 47: DIE-Style Compiler, Packer, Rich Header, Imphash & Overlay Profiler)
+    cmp_p = subparsers.add_parser("compiler-profile", help="Fingerprint compiler, packer, PE Rich Header, Imphash, and trailing overlay")
+    cmp_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    cmp_p.add_argument("--output", "-o", help="Optional path to write JSON compiler/packer profile")
+
+    # syscall-scan (Phase 48: Direct Kernel Syscall ABI Resolver)
+    sys_p = subparsers.add_parser("syscall-scan", help="Detect direct syscall / int 0x80 / svc #0 instructions and resolve kernel ABI names")
+    sys_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    sys_p.add_argument("--platform", default="linux_x64", choices=["linux_x64", "windows_nt_x64", "linux_x86", "linux_arm64"], help="Target syscall ABI")
+    sys_p.add_argument("--output", "-o", help="Optional path to write JSON syscall report")
+
+    # struct-parse (Phase 48: Kaitai/ImHex-Style Declarative C-Struct Template Parser)
+    stp_p = subparsers.add_parser("struct-parse", help="Overlay a C struct definition onto any binary offset and unpack typed fields")
+    stp_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    stp_p.add_argument("--struct-def", required=True, help="C struct definition (e.g. 'struct Hdr { uint32_t magic; uint16_t ver; };')")
+    stp_p.add_argument("--offset", default="0x0", help="File offset to apply struct template")
+    stp_p.add_argument("--output", "-o", help="Optional path to write JSON struct parse report")
+
+    # binary-patch (Phase 49: LIEF/Binary-Ninja Style Non-Destructive Binary Patcher & Micro-Assembler)
+    bp_p = subparsers.add_parser("binary-patch", help="Apply NOP-fill, branch inversion (je<->jne), or return-value patches and save binary")
+    bp_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    bp_p.add_argument("--action", required=True, choices=["nop", "invert-branch", "force-return"], help="Patch operation type")
+    bp_p.add_argument("--offset", required=True, help="File offset to patch (hex or int)")
+    bp_p.add_argument("--length", type=int, default=4, help="Byte length for NOP fill")
+    bp_p.add_argument("--ret-val", type=int, default=1, help="Immediate return value for force-return")
+    bp_p.add_argument("--save-binary", help="Optional output path for patched binary file")
+    bp_p.add_argument("--output", "-o", help="Optional path to write JSON patch transaction log")
+
+    # project-export (Phase 50: Persistent .rfdb Project DB & C-Header / IDAPython / Ghidra Script Exporter)
+    px_p = subparsers.add_parser("project-export", help="Create or export .rfdb project annotations to C Header (.h), IDAPython, or Ghidra script")
+    px_p.add_argument("--format", choices=["c-header", "idapython", "ghidra", "rfdb"], default="c-header", help="Export format")
+    px_p.add_argument("--rename", action="append", default=[], help="Rename mapping ADDR=NAME (e.g. 0x401000=decrypt_packet)")
+    px_p.add_argument("--comment", action="append", default=[], help="Comment mapping ADDR=TEXT (e.g. '0x401000=Entry loop')")
+    px_p.add_argument("--output", "-o", help="Optional path to write exported artifact")
+
+    # jump-tables (Phase 51: Indirect Jump Table & Multi-Target Switch Resolver)
+    jt_p = subparsers.add_parser("jump-tables", help="Resolve indirect switch jump tables via backward microcode slicing")
+    jt_p.add_argument("--asm", required=True, help="Semicolon-separated assembly stream containing indirect jmp")
+    jt_p.add_argument("--output", "-o", help="Optional path to write JSON jump table report")
+
+    # pdb-parse (Phase 52: Automated Microsoft PDB & CodeView RSDS Symbol Server Engine)
+    pdb_p = subparsers.add_parser("pdb-parse", help="Extract PE CodeView RSDS debug records, Symbol Server URLs, or parse MSF v7 PDB files")
+    pdb_p.add_argument("--input", "-i", required=True, help="Target PE binary or .pdb file")
+    pdb_p.add_argument("--output", "-o", help="Optional path to write JSON PDB/RSDS report")
+
+    # struct-infer (Phase 53: Struct Layout Inference & Pointer Offset Recovery Engine)
+    si_p = subparsers.add_parser("struct-infer", help="Infer C struct layouts from pointer offset dereferences and rewrite AST")
+    si_p.add_argument("--code", required=True, help="Decompiled C or assembly lines containing pointer offsets")
+    si_p.add_argument("--output", "-o", help="Optional path to write JSON struct recovery report")
+
+    # flirt-scan (Phase 54: FLIRT Compiler Runtime Identification & De-Stripping Engine)
+    flr_p = subparsers.add_parser("flirt-scan", help="Identify static CRT and library functions using IDA-compatible FLIRT patterns & CRC-16")
+    flr_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    flr_p.add_argument("--output", "-o", help="Optional path to write JSON FLIRT match report")
+
+    # gdb-debug (Phase 55: Native GDB/WinDbg Remote Serial Protocol Dynamic Debugger)
+    gdb_p = subparsers.add_parser("gdb-debug", help="Connect to GDB RSP target (or simulated stub) to inspect registers, breakpoints, and step")
+    gdb_p.add_argument("--host", default="127.0.0.1", help="GDB RSP host")
+    gdb_p.add_argument("--port", type=int, default=1234, help="GDB RSP port")
+    gdb_p.add_argument("--simulated", action="store_true", default=True, help="Use built-in deterministic RSP target simulator")
+    gdb_p.add_argument("--steps", type=int, default=2, help="Number of single-step instructions to execute")
+    gdb_p.add_argument("--output", "-o", help="Optional path to write JSON debugger state snapshot")
+
+    # canvas-cull (Phase 56: High-Performance Virtualized Workbench Quadtree & Multi-LOD Engine)
+    cv_p = subparsers.add_parser("canvas-cull", help="Benchmark Quadtree viewport frustum culling and Multi-LOD serialization")
+    cv_p.add_argument("--nodes", type=int, default=100, help="Number of synthetic CFG nodes to populate")
+    cv_p.add_argument("--zoom", type=float, default=1.0, help="Viewport zoom scale (e.g. 1.0=high, 0.5=medium, 0.2=low)")
+    cv_p.add_argument("--output", "-o", help="Optional path to write JSON viewport frame")
+
+    # recursive-disasm (Phase 57: Pure-Python Table-Driven Recursive Descent Multi-Arch Disassembler)
+    rd_p = subparsers.add_parser("recursive-disasm", help="Run pure-Python table-driven recursive-descent disassembly (x64/ARM64/RISC-V)")
+    rd_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    rd_p.add_argument("--arch", default="x64", choices=["x86", "x64", "arm64", "riscv"], help="Target instruction set")
+    rd_p.add_argument("--output", "-o", help="Optional path to write JSON recursive disassembly")
+
+    # go-rust-recover (Phase 58: Go pclntab & Rust v0 Symbol & Panic Reconstructor)
+    gr_p = subparsers.add_parser("go-rust-recover", help="Recover Go runtime.pclntab functions and demangle Rust v0/_ZN symbols")
+    gr_p.add_argument("--input", "-i", required=True, help="Target Go or Rust binary artifact")
+    gr_p.add_argument("--output", "-o", help="Optional path to write JSON Go/Rust reconstruction report")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -814,11 +900,15 @@ def main():
             "DeobfuscationEngine", "CppRTTIEngine", "FirmwareBaseEngine",
             "UnwindFrameEngine", "TraceDiffEngine", "StreamingPEAnalyzer",
             "BinaryABBenchmarker", "GUIWorkbenchServer", "BinaryIntelEngine",
-            "DesktopAppStudio",
+            "DesktopAppStudio", "ObfuscatedStringSolver", "CompilerPackerProfiler",
+            "SyscallAndStructEngine", "BinaryPatcherEngine", "ProjectWorkspaceDB",
+            "IndirectJumpTableResolver", "PDBSymbolEngine", "StructLayoutRecoveryEngine",
+            "FLIRTRuntimeEngine", "GDBRSPClient", "VirtualizedCanvasEngine",
+            "RecursiveDescentDisassembler", "GoRustReconstructor", "ForgeScriptingWorkspace",
         ]
         report = {
-            "version": "7.0.0-singularity",
-            "phases_implemented": 45,
+            "version": "9.0.0-sovereign",
+            "phases_implemented": 60,
             "internal_engines_count": len(internal_engines),
             "internal_engines_status": "ALL_READY",
             "external_toolchains": {
@@ -1179,6 +1269,188 @@ def main():
                 launch_native_tk_ide(args.input)
         else:
             launch_native_tk_ide(args.input)
+
+    elif args.command == "floss-strings":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.string_deobfuscator import ObfuscatedStringSolver
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = ObfuscatedStringSolver().deobfuscate_all_strings(data, min_len=args.min_len)
+        _write_or_print(asdict(rep), args.output, "FLOSS Obfuscated & Stack String Recovery")
+
+    elif args.command == "compiler-profile":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.binary_intel_engine import BinaryIntelEngine
+        from reverse_forge.compiler_packer_profiler import CompilerPackerProfiler
+        with open(args.input, "rb") as f:
+            data = f.read()
+        intel = BinaryIntelEngine(data, filepath=args.input)
+        prof = CompilerPackerProfiler().profile_binary(
+            data,
+            sections=intel.metadata.get("sections", []),
+            imported_symbols=intel.metadata.get("imported_symbols", []),
+        )
+        _write_or_print(asdict(prof), args.output, "Compiler, Packer, Rich Header & Imphash Profile")
+
+    elif args.command == "syscall-scan":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.syscall_struct_engine import SyscallAndStructEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        sites = SyscallAndStructEngine().resolve_direct_syscalls(data, platform_hint=args.platform)
+        _write_or_print({"artifact": os.path.abspath(args.input), "syscalls_count": len(sites), "syscalls": [asdict(s) for s in sites]}, args.output, "Direct Syscall ABI Scan")
+
+    elif args.command == "struct-parse":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.syscall_struct_engine import SyscallAndStructEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        off_int = int(args.offset, 16) if args.offset.strip().lower().startswith("0x") else int(args.offset, 10)
+        res = SyscallAndStructEngine().apply_c_struct_template(data, args.struct_def, base_offset=off_int)
+        _write_or_print(asdict(res), args.output, "Kaitai/ImHex C-Struct Template Parse")
+
+    elif args.command == "binary-patch":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.binary_patcher import BinaryPatcherEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        patcher = BinaryPatcherEngine(data)
+        off_int = int(args.offset, 16) if args.offset.strip().lower().startswith("0x") else int(args.offset, 10)
+        if args.action == "nop":
+            patcher.nop_range(off_int, args.length)
+        elif args.action == "invert-branch":
+            patcher.invert_conditional_branch(off_int)
+        elif args.action == "force-return":
+            patcher.patch_function_return(off_int, return_value=args.ret_val)
+        if args.save_binary:
+            rep = patcher.save_patched_binary(args.save_binary)
+        else:
+            rep = patcher.get_patch_summary()
+        _write_or_print(asdict(rep), args.output, "Binary Patch Transaction Summary")
+
+    elif args.command == "project-export":
+        from reverse_forge.project_workspace_db import ProjectWorkspaceDB
+        proj = ProjectWorkspaceDB()
+        for r_pair in args.rename:
+            if "=" in r_pair:
+                a_k, n_v = r_pair.split("=", 1)
+                proj.rename_symbol(a_k, n_v)
+        for c_pair in args.comment:
+            if "=" in c_pair:
+                a_k, c_v = c_pair.split("=", 1)
+                proj.set_comment(a_k, c_v)
+        if args.format == "c-header":
+            out_txt = proj.export_c_header()
+        elif args.format == "idapython":
+            out_txt = proj.export_idapython_script()
+        elif args.format == "ghidra":
+            out_txt = proj.export_ghidra_script()
+        else:
+            out_txt = json.dumps(proj.to_dict(), indent=2)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(out_txt)
+            print(f"[+] Exported {args.format} to {args.output}")
+        else:
+            print(out_txt)
+
+    elif args.command == "jump-tables":
+        from dataclasses import asdict
+        from reverse_forge.jump_table_resolver import IndirectJumpTableResolver
+        insns = []
+        addr = 0x401000
+        for raw_stmt in args.asm.split(";"):
+            stmt = raw_stmt.strip()
+            if not stmt:
+                continue
+            parts = stmt.split(None, 1)
+            insns.append((addr, parts[0], parts[1].strip() if len(parts) > 1 else ""))
+            addr += 4
+        tables = IndirectJumpTableResolver().resolve_jump_tables_in_stream(insns)
+        _write_or_print({"tables_resolved": len(tables), "tables": [asdict(t) for t in tables]}, args.output, "Indirect Jump Table Resolution")
+
+    elif args.command == "pdb-parse":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.pdb_symbol_engine import PDBSymbolEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        eng = PDBSymbolEngine()
+        if data.startswith(eng.MSF7_MAGIC):
+            rep = asdict(eng.parse_pdb_bytes(data))
+        else:
+            rep = asdict(eng.extract_codeview_rsds(data))
+        _write_or_print(rep, args.output, "Microsoft PDB & CodeView RSDS Analysis")
+
+    elif args.command == "struct-infer":
+        from dataclasses import asdict
+        from reverse_forge.struct_recovery_engine import StructLayoutRecoveryEngine
+        lines = [s.strip() for s in args.code.split(";") if s.strip()]
+        structs, rewritten = StructLayoutRecoveryEngine().recover_structs_from_code(lines)
+        _write_or_print({"structs_recovered": len(structs), "structs": [asdict(s) for s in structs], "rewritten_c": rewritten}, args.output, "Struct Layout Recovery")
+
+    elif args.command == "flirt-scan":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.flirt_runtime_engine import FLIRTRuntimeEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        matches = FLIRTRuntimeEngine().scan_and_destrip(data)
+        _write_or_print({"matches_count": len(matches), "matches": [asdict(m) for m in matches]}, args.output, "FLIRT Runtime Signature Scan")
+
+    elif args.command == "gdb-debug":
+        from dataclasses import asdict
+        from reverse_forge.gdb_rsp_debugger import GDBRSPClient
+        dbg = GDBRSPClient(host=args.host, port=args.port, simulated=args.simulated)
+        dbg.connect()
+        dbg.set_breakpoint(0x401004, "sw")
+        snap = None
+        for _ in range(max(1, args.steps)):
+            snap = dbg.step_into()
+        dbg.close()
+        _write_or_print(asdict(snap), args.output, "GDB RSP Dynamic Debugger Snapshot")
+
+    elif args.command == "canvas-cull":
+        from reverse_forge.virtualized_canvas_engine import VirtualizedCanvasEngine, GraphNodeBox, ViewportBox
+        vc = VirtualizedCanvasEngine()
+        for i in range(args.nodes):
+            vc.add_node(GraphNodeBox(i, f"sub_{0x401000 + i*16:x}", float((i % 20) * 320), float((i // 20) * 180), 260.0, 120.0, 0.4, ["push rbp", "ret"], []))
+        frame = vc.render_viewport_frame(ViewportBox(0.0, 0.0, 1920.0, 1080.0, zoom_scale=args.zoom))
+        _write_or_print(frame, args.output, "Virtualized Canvas Quadtree Viewport Frame")
+
+    elif args.command == "recursive-disasm":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.recursive_disassembler import RecursiveDescentDisassembler
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        base_va = entry_va or 0x401000
+        ins_map = RecursiveDescentDisassembler(arch=args.arch).disassemble_recursive(code_slice[:4096], base_va=base_va)
+        _write_or_print({"instructions_count": len(ins_map), "instructions": {hex(k): asdict(v) for k, v in ins_map.items()}}, args.output, "Recursive Descent Disassembly")
+
+    elif args.command == "go-rust-recover":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.go_rust_reconstructor import GoRustReconstructor
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rec = GoRustReconstructor()
+        go_rep = rec.parse_go_pclntab(data)
+        rust_rep = rec.reconstruct_rust_metadata(data)
+        _write_or_print({"go_pclntab": asdict(go_rep), "rust_metadata": asdict(rust_rep)}, args.output, "Go & Rust Semantic Reconstruction")
 
 
 if __name__ == "__main__":

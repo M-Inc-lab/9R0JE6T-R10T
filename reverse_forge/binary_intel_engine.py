@@ -656,6 +656,26 @@ class BinaryIntelEngine:
             "top_xrefs": [asdict(x) for x in xrefs],
             "decompiled_entry_c": dfunc.c_source,
             "structured_goto_free_c": structured.structured_c,
+            "compiler_packer_profile": asdict(
+                __import__("reverse_forge.compiler_packer_profiler", fromlist=["CompilerPackerProfiler"])
+                .CompilerPackerProfiler()
+                .profile_binary(
+                    self.binary_bytes,
+                    sections=self.metadata.get("sections", []),
+                    imported_symbols=self.metadata.get("imported_symbols", []),
+                )
+            ),
+            "deobfuscated_strings": asdict(
+                __import__("reverse_forge.string_deobfuscator", fromlist=["ObfuscatedStringSolver"])
+                .ObfuscatedStringSolver()
+                .deobfuscate_all_strings(self.binary_bytes)
+            ),
+            "direct_syscalls": [
+                asdict(s)
+                for s in __import__("reverse_forge.syscall_struct_engine", fromlist=["SyscallAndStructEngine"])
+                .SyscallAndStructEngine()
+                .resolve_direct_syscalls(code_slice[:512], base_va=base_va)
+            ],
         }
 
     def smart_query(self, query: str) -> SmartQueryAnswer:
@@ -727,6 +747,51 @@ class BinaryIntelEngine:
                 summary_answer=f"Retrieved security mitigation posture for {self.format_name} ({len(mits)} flags).",
                 total_matches=len(mits) or 1,
                 results=[{"mitigations": mits, "format": self.format_name, "architecture": self.metadata.get("architecture")}],
+            )
+
+        # 4b. Compiler / Packer / Rich Header / Imphash / Overlay query
+        if any(w in ql for w in ("compiler", "packer", "rich", "imphash", "overlay", "upx", "vmprotect", "toolchain")):
+            from reverse_forge.compiler_packer_profiler import CompilerPackerProfiler
+            prof = CompilerPackerProfiler().profile_binary(
+                self.binary_bytes,
+                sections=self.metadata.get("sections", []),
+                imported_symbols=self.metadata.get("imported_symbols", []),
+            )
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="COMPILER_AND_PACKER_PROVENANCE",
+                summary_answer=(
+                    f"Compilers: {', '.join(prof.detected_compilers)}; "
+                    f"Packers: {', '.join(prof.detected_packers_or_protectors) or 'None'}; "
+                    f"Language: {prof.detected_runtime_language}; Imphash: {prof.imphash_md5 or 'N/A'}."
+                ),
+                total_matches=1,
+                results=[asdict(prof)],
+            )
+
+        # 4c. Stack / XOR obfuscated strings query
+        if any(w in ql for w in ("stack string", "floss", "obfuscated string", "xor string")):
+            from reverse_forge.string_deobfuscator import ObfuscatedStringSolver
+            s_rep = ObfuscatedStringSolver().deobfuscate_all_strings(self.binary_bytes)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="DEOBFUSCATED_STRINGS",
+                summary_answer=f"Recovered {s_rep.total_recovered} obfuscated/stack string(s).",
+                total_matches=s_rep.total_recovered,
+                results=[asdict(x) for x in s_rep.recovered_strings],
+            )
+
+        # 4d. Direct Syscalls query
+        if "syscall" in ql:
+            from reverse_forge.syscall_struct_engine import SyscallAndStructEngine
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(self.binary_bytes, self.metadata)
+            sc = SyscallAndStructEngine().resolve_direct_syscalls(code_slice, base_va=entry_va or 0x401000)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="DIRECT_SYSCALL_SCAN",
+                summary_answer=f"Resolved {len(sc)} direct syscall instruction(s).",
+                total_matches=len(sc),
+                results=[asdict(x) for x in sc],
             )
 
         # 5. Cross-references

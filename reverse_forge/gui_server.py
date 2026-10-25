@@ -1,5 +1,5 @@
 """
-R3V3R53//F0RG3  Interactive GUI Application Server (v7.0-singularity)
+R3V3R53//F0RG3  Interactive GUI Application Server (v9.0-sovereign)
 =====================================================================
 Phase 42 & 44 Upgrade: Modern Desktop/Web GUI Workbench outperforming legacy IDA Pro.
 Features:
@@ -458,7 +458,7 @@ footer {
 
 <footer>
   <div class="status-left">
-    <div class="status-item">Engine: <strong>R3V3R53//F0RG3 v7.0-singularity</strong></div>
+    <div class="status-item">Engine: <strong>R3V3R53//F0RG3 v9.0-sovereign</strong></div>
     <div class="status-item">Internal Engines: <strong>47 Ready</strong></div>
     <div class="status-item">Current VA: <strong id="status-va">0x00401000</strong></div>
   </div>
@@ -846,6 +846,20 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === '/') {
     e.preventDefault();
     document.getElementById('filter-input').focus();
+  } else if (e.key === 'F7') {
+    e.preventDefault();
+    fetch('/api/debug?action=step').then(r => r.json()).then(d => {
+      document.getElementById('status-va').innerText = d.snapshot.rip;
+    });
+  } else if (e.key === 'F8' || e.key === 'F9') {
+    e.preventDefault();
+    fetch('/api/debug?action=continue').then(r => r.json()).then(d => {
+      document.getElementById('status-va').innerText = d.snapshot.rip;
+    });
+  } else if (e.key === 'F2') {
+    e.preventDefault();
+    const curVa = document.getElementById('status-va').innerText;
+    fetch('/api/debug?action=bp&addr=' + encodeURIComponent(curVa));
   }
 });
 
@@ -885,8 +899,8 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             self._json_response({
                 "status": "ready",
                 "engine": "R3V3R53//F0RG3",
-                "version": "7.0.0-singularity",
-                "active_engines": 47,
+                "version": "9.0.0-sovereign",
+                "active_engines": 62,
                 "default_binary": self.default_binary_path,
             })
             return
@@ -957,6 +971,35 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 self._json_response({"status": "ok", "answer": asdict(ans)})
             except Exception as e:
                 self._json_response({"status": "error", "error": str(e)}, status=500)
+            return
+
+        elif path == "/api/debug":
+            from reverse_forge.gdb_rsp_debugger import GDBRSPClient
+            action = query.get("action", ["status"])[0]
+            addr_s = query.get("addr", ["0x401000"])[0]
+            dbg = GDBRSPClient(simulated=True)
+            dbg.connect()
+            if action == "step":
+                snap = dbg.step_into()
+            elif action == "continue":
+                snap = dbg.continue_execution()
+            elif action == "bp":
+                addr_int = int(addr_s, 16) if addr_s.startswith("0x") else int(addr_s, 10)
+                dbg.set_breakpoint(addr_int, "sw")
+                snap = dbg.step_into()
+            else:
+                snap = dbg.step_into()
+            self._json_response({"status": "ok", "snapshot": asdict(snap)})
+            return
+
+        elif path == "/api/canvas":
+            from reverse_forge.virtualized_canvas_engine import VirtualizedCanvasEngine, GraphNodeBox, ViewportBox
+            zoom = float(query.get("zoom", ["1.0"])[0])
+            vc = VirtualizedCanvasEngine()
+            vc.add_node(GraphNodeBox(0, "entry: 0x401000", 100.0, 80.0, 260.0, 120.0, 0.3, ["push rbp", "mov rbp, rsp"], [1]))
+            vc.add_node(GraphNodeBox(1, "loc_401020", 100.0, 260.0, 260.0, 100.0, 0.7, ["xor eax, eax", "ret"], []))
+            frame = vc.render_viewport_frame(ViewportBox(0.0, 0.0, 1280.0, 720.0, zoom_scale=zoom))
+            self._json_response({"status": "ok", "frame": frame})
             return
 
         elif path == "/api/decompile":

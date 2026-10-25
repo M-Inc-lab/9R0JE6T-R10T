@@ -187,7 +187,7 @@ class TestPhase40TraceDiffEngineAndOmegaCLI(unittest.TestCase):
             capture_output=True, text=True, check=True,
         )
         doc_json = json.loads(doc.stdout)
-        self.assertTrue(doc_json["version"] in ("5.0.0-omega", "6.0.0-quantum", "7.0.0-singularity"))
+        self.assertTrue(doc_json["version"] in ("5.0.0-omega", "6.0.0-quantum", "7.0.0-singularity", "8.0.0-omniscient", "9.0.0-sovereign"))
         self.assertGreaterEqual(doc_json["phases_implemented"], 40)
         self.assertGreaterEqual(doc_json["internal_engines_count"], 43)
 
