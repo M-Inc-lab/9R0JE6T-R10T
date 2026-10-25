@@ -115,7 +115,7 @@ def build_desktop_workspace_model(binary_path: Optional[str] = None, raw_bytes: 
         capabilities=dossier["capabilities"],
         xrefs=dossier["top_xrefs"],
         decompiled_c=dossier["decompiled_entry_c"],
-        structured_c=dossier["structured_goto_free_c"],
+        structured_c=dossier.get("unified_decompiled_c") or dossier["structured_goto_free_c"],
         cfg_blocks=cfg_blocks_serialized,
         hex_lines=hex_lines,
         entry_inspection=entry_insp,
@@ -202,7 +202,7 @@ def launch_native_tk_ide(binary_path: Optional[str] = None) -> None:
             print(json.dumps(asdict(model), indent=2))
         return
 
-    root.title("9R0JE6T R10T // R3V3R53-F0RG3 Cross-Platform Desktop Studio (v7.0-singularity)")
+    root.title("9R0JE6T R10T // R3V3R53-F0RG3 Cross-Platform Desktop Studio (v11.0.0-eternal)")
     root.geometry("1360x840")
     root.configure(bg="#0a0e17")
 
@@ -318,7 +318,7 @@ def launch_native_tk_ide(binary_path: Optional[str] = None) -> None:
         m: DesktopWorkspaceModel = state["model"]
         status_var.set(
             f"Target: {m.filename}  |  Format: {m.format_name} ({m.architecture})  |  "
-            f"Entry: {m.entry_point}  |  SHA-256: {m.sha256[:24]}...  |  47 Internal Engines Ready"
+            f"Entry: {m.entry_point}  |  SHA-256: {m.sha256[:24]}...  |  64 Internal Engines Ready"
         )
 
         # Populate Treeview

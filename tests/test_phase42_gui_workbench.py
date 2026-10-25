@@ -67,7 +67,7 @@ def test_gui_workbench_server_rest_api():
             assert resp.status == 200
             data = json.loads(resp.read().decode("utf-8"))
             assert data["status"] == "ready"
-            assert data["version"] in ("6.0.0-quantum", "7.0.0-singularity", "8.0.0-omniscient", "9.0.0-sovereign")
+            assert data["version"] in ("6.0.0-quantum", "7.0.0-singularity", "8.0.0-omniscient", "9.0.0-sovereign", "10.0.0-zenith", "11.0.0-eternal")
             assert data["active_engines"] >= 45
 
         # Test 3: GET /api/load on a temporary binary

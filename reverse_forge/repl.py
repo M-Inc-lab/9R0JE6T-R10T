@@ -99,13 +99,29 @@ def _init_readline(completer_fn) -> None:
 
 
 COMMAND_GROUPS: Dict[str, List[Tuple[str, str]]] = {
-    "🧠  Smart Binary Intelligence (New in v7.0)": [
-        ("dossier",         "Complete one-stop executive & technical binary dossier"),
-        ("ask",             "Ask any question or keyword ('network', 'crypto', '0x401000')"),
-        ("capabilities",    "CAPA-style behavioral capabilities & MITRE ATT&CK matrix"),
-        ("xrefs",           "Bidirectional CALL, JMP & RIP-relative string cross-references"),
-        ("inspect",         "ImHex-style 14-format Data Inspector at any offset or VA"),
-        ("desktop-app",     "Launch Cross-Platform Native Desktop Studio (Tkinter/App Window)"),
+    "🧠  Smart Binary Intelligence & Sovereign Suite (v10.0-zenith)": [
+        ("dossier",          "Complete one-stop executive & technical binary dossier"),
+        ("ask",              "Ask any question or keyword ('network', 'compiler', '0x401000')"),
+        ("vuln-scan", "Automated CWE vulnerability scanner"),
+        ("decompile-full",   "8-Pass Unified Decompiler (Disasm->Switch->FLIRT->SSA->Struct)"),
+        ("capabilities",     "CAPA-style behavioral capabilities & MITRE ATT&CK matrix"),
+        ("xrefs",            "Bidirectional CALL, JMP & RIP-relative string cross-references"),
+        ("inspect",          "ImHex-style 14-format Data Inspector at any offset or VA"),
+        ("floss-strings",    "Recover stack-constructed and XOR/ADD obfuscated strings"),
+        ("compiler-profile", "Detect compiler, packer, PE Rich Header, Imphash & overlay"),
+        ("syscall-scan",     "Resolve direct syscall / int 0x80 / svc #0 kernel ABI names"),
+        ("struct-parse",     "Apply Kaitai/ImHex C struct template at any binary offset"),
+        ("binary-patch",     "Apply NOP, branch-invert (je<->jne), or return-value patches"),
+        ("project-export",   "Export .rfdb project to C Header (.h), IDAPython, or Ghidra"),
+        ("jump-tables",      "Resolve indirect switch jump tables via backward slicing"),
+        ("pdb-parse",        "Extract PE CodeView RSDS / Symbol Server URLs & parse MSF7 PDB"),
+        ("struct-infer",     "Infer C struct layouts from pointer offsets and rewrite AST"),
+        ("flirt-scan",       "Identify static CRT & library functions via FLIRT & CRC-16"),
+        ("gdb-debug",        "Connect to GDB RSP debugger to inspect registers and step"),
+        ("canvas-cull",      "Quadtree viewport frustum culling & Multi-LOD serializer"),
+        ("recursive-disasm", "Pure-Python table-driven recursive-descent disassembler"),
+        ("go-rust-recover",  "Recover Go runtime.pclntab functions & Rust v0/_ZN symbols"),
+        ("desktop-app",      "Launch Cross-Platform Native Desktop Studio (Tkinter/App Window)"),
     ],
     "🔍  Triage & Discovery": [
         ("triage",          "Cross-platform format triage (PE/ELF/Mach-O/JVM)"),
@@ -249,7 +265,7 @@ BANNER = r"""
  ║   ██╔══██╗ ╚═══██╗╚██╗ ██╔╝██╔══╝ ██╔══██╗╚═══██╗ ╚═══██╗            ║
  ║   ██║  ██║██████╔╝ ╚████╔╝ ███████╗██║  ██║██████╔╝██████╔╝          ║
  ║   ╚═╝  ╚═╝╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝╚═════╝ ╚═════╝           ║
- ║            ╔═╗╔═╗╦═╗╔═╗╔═╗  //  F0RG3  v7.0.0-singularity            ║
+ ║            ╔═╗╔═╗╦═╗╔═╗╔═╗  //  F0RG3  v11.0.0-eternal            ║
  ║            ╠╣ ║ ║╠╦╝║ ╦║╣                                            ║
  ║            ╚  ╚═╝╩╚═╚═╝╚═╝  47 Engines · 54 Commands · Stateful TUI  ║
  ╚═══════════════════════════════════════════════════════════════��[...]
@@ -259,7 +275,7 @@ BANNER = r"""
 def _print_banner() -> None:
     for line in BANNER.strip().splitlines():
         if "v7.0.0" in line:
-            line = line.replace("v7.0.0-singularity", _yellow("v7.0.0-singularity"))
+            line = line.replace("v11.0.0-eternal", _yellow("v11.0.0-eternal"))
         if "╔" in line or "╚" in line or "║" in line:
             line = _magenta(line) if ("██" in line or "═╗" in line or "═╝" in line) else _blue(line)
         print(line)
@@ -540,7 +556,7 @@ def repl_main(initial_binary: Optional[str] = None) -> None:
             continue
 
         elif cmd == "version":
-            print(f"\n  {_bold('R3V3R53//F0RG3')} {_yellow('v7.0.0-singularity')}")
+            print(f"\n  {_bold('R3V3R53//F0RG3')} {_yellow('v11.0.0-eternal')}")
             print(f"  {_dim('47 internal engines · 54 subcommands · pure Python core')}\n")
             continue
 

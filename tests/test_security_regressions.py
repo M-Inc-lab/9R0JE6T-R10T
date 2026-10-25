@@ -238,14 +238,13 @@ class SecurityRegressionTests(unittest.TestCase):
         if os.path.exists("/bin/ls"):
             with open("/bin/ls", "rb") as f:
                 ls_data = f.read()
-            if ls_data.startswith(b"\x7fELF"):
-                audit = ELFAnalyzer(ls_data).full_audit()
-                self.assertTrue(audit["is_elf"])
-                self.assertTrue(audit["mitigations"]["nx"])
-                self.assertTrue(audit["mitigations"]["pie"])
-                self.assertIn("RELRO", audit["mitigations"]["relro"])
-                self.assertGreater(len(audit["shared_libraries"]), 0)
-                self.assertGreater(audit["imported_symbols_count"], 0)
+            audit = ELFAnalyzer(ls_data).full_audit()
+            self.assertTrue(audit["is_elf"])
+            self.assertTrue(audit["mitigations"]["nx"])
+            self.assertTrue(audit["mitigations"]["pie"])
+            self.assertIn("RELRO", audit["mitigations"]["relro"])
+            self.assertGreater(len(audit["shared_libraries"]), 0)
+            self.assertGreater(audit["imported_symbols_count"], 0)
 
     def test_phase2_macho_deep_audit_and_entitlements(self):
         """Verify MachOAnalyzer extracts dylibs, symbols, stack canary, and CS_SuperBlob XML entitlements."""

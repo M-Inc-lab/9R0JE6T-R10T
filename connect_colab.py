@@ -1,16 +1,29 @@
 import argparse
 import json
+import logging
 import os
+import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from typing import Optional
 
+from gpu_client import CleartextTokenSecurityWarning, build_verified_ssl_context
 
-def validate_endpoint_url(raw_url: str, allow_http: bool = False) -> str:
-    """Validate and normalize the remote endpoint URL."""
+logger = logging.getLogger("reverse_forge.connect_colab")
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def validate_endpoint_url(
+    raw_url: str,
+    allow_http: bool = False,
+    token: Optional[str] = None,
+    allow_cleartext_token: bool = False,
+) -> str:
+    """Validate and normalize the remote endpoint URL with strict scheme and token checks."""
     cleaned = raw_url.strip()
     if any(ch in cleaned for ch in ("\r", "\n", "\x00")):
         raise ValueError("URL contains forbidden control characters")
@@ -25,6 +38,18 @@ def validate_endpoint_url(raw_url: str, allow_http: bool = False) -> str:
     if not parsed.netloc or " " in parsed.netloc:
         raise ValueError(f"Invalid URL hostname: {parsed.netloc!r}")
 
+    if parsed.scheme == "http":
+        msg = (
+            f"[SECURITY WARNING] Allowing unencrypted HTTP tunnel '{cleaned}'. "
+            "Do not transmit sensitive Bearer tokens over public networks."
+        )
+        warnings.warn(msg, CleartextTokenSecurityWarning, stacklevel=2)
+        logger.warning(msg)
+        if token and parsed.hostname not in LOOPBACK_HOSTS and not allow_cleartext_token:
+            raise ValueError(
+                f"Refusing to bind Bearer token over unencrypted non-loopback HTTP endpoint ({parsed.hostname!r})."
+            )
+
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
 
 
@@ -37,7 +62,10 @@ def check_health(base_url: str, token: Optional[str] = None) -> bool:
         headers["Authorization"] = f"Bearer {token}"
     try:
         req = urllib.request.Request(health_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        is_https = health_url.startswith("https://")
+        ssl_ctx: Optional[ssl.SSLContext] = build_verified_ssl_context() if is_https else None
+        open_kwargs = {"timeout": 10, "context": ssl_ctx} if ssl_ctx is not None else {"timeout": 10}
+        with urllib.request.urlopen(req, **open_kwargs) as response:
             latency = round((time.time() - start_time) * 1000, 2)
             data = json.loads(response.read().decode("utf-8"))
             print(f"[+] Server responding! Latency: {latency}ms")
@@ -148,12 +176,12 @@ def main():
     if not raw_url:
         raw_url = input("Enter Colab Cloudflare URL: ").strip()
 
+    token = args.token or os.environ.get("COLAB_GPU_TOKEN")
+
     try:
-        url = validate_endpoint_url(raw_url, allow_http=args.allow_insecure_http)
+        url = validate_endpoint_url(raw_url, allow_http=args.allow_insecure_http, token=token)
     except ValueError as exc:
         sys.exit(f"[FAIL] Invalid endpoint URL: {exc}")
-
-    token = args.token or os.environ.get("COLAB_GPU_TOKEN")
 
     if check_health(url, token=token):
         update_env(url, token=token)

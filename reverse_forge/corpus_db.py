@@ -21,16 +21,10 @@ class ArtifactKnowledgeBase:
         self.db_path = os.path.abspath(db_path)
         self._init_schema()
 
-    import contextlib
-
-    @contextlib.contextmanager
-    def _connect(self):
+    def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-        finally:
-            conn.close()
+        return conn
 
     def _init_schema(self) -> None:
         with self._connect() as conn:

@@ -92,18 +92,15 @@ class TestPhase3PipelineStateMachine(unittest.TestCase):
 
     def test_full_pipeline_on_elf_binary(self):
         if os.path.exists("/bin/ls"):
-            with open("/bin/ls", "rb") as f:
-                header = f.read(4)
-            if header == b"\x7fELF":
-                sm = PipelineStateMachine(
-                    artifact_path="/bin/ls",
-                    autonomy_level=AutonomyLevel.AUTONOMOUS,
-                    workspace_dir=self.tmp_dir.name
-                )
-                res = sm.run_all()
-                for st in res["stages"]:
-                    self.assertIn(st["status"], (StageStatus.COMPLETED.value, StageStatus.SKIPPED.value))
-                self.assertGreaterEqual(len(res["report_json"]["findings"]), 1)
+            sm = PipelineStateMachine(
+                artifact_path="/bin/ls",
+                autonomy_level=AutonomyLevel.AUTONOMOUS,
+                workspace_dir=self.tmp_dir.name
+            )
+            res = sm.run_all()
+            for st in res["stages"]:
+                self.assertIn(st["status"], (StageStatus.COMPLETED.value, StageStatus.SKIPPED.value))
+            self.assertGreaterEqual(len(res["report_json"]["findings"]), 1)
 
 
 if __name__ == "__main__":

@@ -1,2 +1,22 @@
+# ============================================================================
+# R3V3R53//F0RG3 (9R0JE6T-R10T v11.1.0-eternal) — Synchronized Requirements
+# Note: All 64 internal engines run in 100% pure Python with zero mandatory
+# external C-extensions. Installing the packages below enables native C++/Rust
+# acceleration and remote Colab GPU / MCP server features.
+#
+# Editable install with extras:
+#   pip install -e .[colab]
+#   pip install -e .[symbolic,dbi]
+#   pip install -e .[all]
+# ============================================================================
+
+# Core Disassembly, PE & Symbolic SMT Acceleration (PATCH 1 & PATCH 3)
 pefile>=2023.2.7
 capstone>=5.0.0
+z3-solver>=4.12.0
+
+# Colab T4 GPU Bridge & MCP Server Extras (pip install -e .[colab])
+fastmcp>=0.4.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0

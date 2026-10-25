@@ -5,6 +5,7 @@ import os
 import re
 import struct
 import sys
+import zipfile
 from typing import Dict, Any, List
 
 from reverse_forge.pe_analyzer import PEAnalyzer
@@ -482,6 +483,17 @@ def main():
     gr_p.add_argument("--input", "-i", required=True, help="Target Go or Rust binary artifact")
     gr_p.add_argument("--output", "-o", help="Optional path to write JSON Go/Rust reconstruction report")
 
+    # decompile-full (Phase 62: Unified 8-Pass End-to-End Decompilation Pipeline)
+    df_p = subparsers.add_parser("decompile-full", help="Run the unified 8-pass decompilation pipeline (RecursiveDisasm -> JumpTable -> FLIRT -> UIL -> SSA -> MBA -> Region -> Struct)")
+    df_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    df_p.add_argument("--arch", default="x64", choices=["x86", "x64", "arm64", "riscv"], help="Target architecture")
+    df_p.add_argument("--output", "-o", help="Optional path to write JSON unified decompilation report")
+
+    # vuln-scan (Phase 68: Automated CWE Vulnerability & Exploit Primitive Scanner)
+    vs_p = subparsers.add_parser("vuln-scan", help="Scan binary for CWE memory-corruption & logic vulnerabilities")
+    vs_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    vs_p.add_argument("--output", "-o", help="Optional path to write JSON vulnerability scan report")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -653,6 +665,7 @@ def main():
 
     elif args.command == "unpack":
         _require_existing_file(args.input)
+        installer.ensure_unpacking_tools()
         from reverse_forge.layer_unpacker import LayerUnpacker
         with open(args.input, "rb") as f:
             data = f.read()
@@ -873,6 +886,7 @@ def main():
 
     elif args.command == "doctor":
         import shutil
+        import reverse_forge.smt_solver_engine  # Registers built-in Z3 BitVec engine if external z3-solver is absent
         from reverse_forge.ida_analyzer import IDAHeadlessAnalyzer
         tools = installer.detect_all()
         optional_mods = {}
@@ -905,10 +919,11 @@ def main():
             "IndirectJumpTableResolver", "PDBSymbolEngine", "StructLayoutRecoveryEngine",
             "FLIRTRuntimeEngine", "GDBRSPClient", "VirtualizedCanvasEngine",
             "RecursiveDescentDisassembler", "GoRustReconstructor", "ForgeScriptingWorkspace",
+            "UnifiedDecompilerPipeline", "BinaryVulnerabilityScannerEngine",
         ]
         report = {
-            "version": "9.0.0-sovereign",
-            "phases_implemented": 60,
+            "version": "11.0.0-eternal",
+            "phases_implemented": 70,
             "internal_engines_count": len(internal_engines),
             "internal_engines_status": "ALL_READY",
             "external_toolchains": {
@@ -1451,6 +1466,35 @@ def main():
         go_rep = rec.parse_go_pclntab(data)
         rust_rep = rec.reconstruct_rust_metadata(data)
         _write_or_print({"go_pclntab": asdict(go_rep), "rust_metadata": asdict(rust_rep)}, args.output, "Go & Rust Semantic Reconstruction")
+
+    elif args.command == "decompile-full":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.unified_decompiler_pipeline import UnifiedDecompilerPipeline
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        res = UnifiedDecompilerPipeline(arch=args.arch).decompile_function_bytes(code_slice, base_va=entry_va or 0x401000)
+        _write_or_print(asdict(res), args.output, "Unified 8-Pass Decompilation")
+
+    elif args.command == "vuln-scan":
+        _require_existing_file(args.input)
+        from reverse_forge.binary_intel_engine import BinaryIntelEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        dos = BinaryIntelEngine(data, filepath=args.input).get_full_dossier()
+        _write_or_print({
+            "vulnerabilities_count": dos.get("vulnerabilities_count", 0),
+            "risk_rating": dos.get("vulnerability_risk_rating", "CLEAN"),
+            "vulnerabilities": dos.get("vulnerabilities", []),
+        }, args.output, "Automated CWE Vulnerability Scan")
 
 
 if __name__ == "__main__":

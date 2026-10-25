@@ -13,6 +13,58 @@ Provides:
 
 from dataclasses import dataclass, field
 import re
+import ast
+import operator
+
+_SAFE_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.BitAnd: operator.and_,
+    ast.BitOr: operator.or_,
+    ast.BitXor: operator.xor,
+    ast.Mod: operator.mod,
+    ast.LShift: lambda a, b: (a << max(0, min(63, b))),
+    ast.RShift: lambda a, b: (a >> max(0, min(63, b))),
+}
+_SAFE_UNARYOPS = {
+    ast.Invert: lambda a: ~a,
+    ast.USub: lambda a: -a,
+    ast.UAdd: lambda a: +a,
+    ast.Not: lambda a: not a,
+}
+_SAFE_CMPOPS = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+}
+
+
+def _safe_eval_ast(expr_str: str, env: dict):
+    tree = ast.parse(expr_str, mode="eval")
+
+    def _eval_node(node: ast.AST):
+        if isinstance(node, ast.Expression):
+            return _eval_node(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, bool)):
+            return int(node.value)
+        if isinstance(node, ast.Name):
+            if node.id not in env:
+                raise ValueError(f"Unknown variable: {node.id}")
+            return env[node.id]
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _SAFE_UNARYOPS:
+            return _SAFE_UNARYOPS[type(node.op)](_eval_node(node.operand))
+        if isinstance(node, ast.BinOp) and type(node.op) in _SAFE_BINOPS:
+            return _SAFE_BINOPS[type(node.op)](_eval_node(node.left), _eval_node(node.right))
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and type(node.ops[0]) in _SAFE_CMPOPS:
+            return _SAFE_CMPOPS[type(node.ops[0])](_eval_node(node.left), _eval_node(node.comparators[0]))
+        raise ValueError(f"Disallowed AST node: {type(node).__name__}")
+
+    return _eval_node(tree)
+
 from typing import Callable, Dict, List, Optional, Set, Tuple
 from reverse_forge.decompiler_engine import BasicBlock
 
@@ -66,7 +118,7 @@ class DeobfuscationEngine:
             return None
         env = {v1_name: x & cls.MASK64, v2_name: y & cls.MASK64}
         try:
-            val = eval(expr, {"__builtins__": {}}, env)
+            val = _safe_eval_ast(expr, env)
             return int(val) & cls.MASK64
         except Exception:
             return None
@@ -175,7 +227,7 @@ class DeobfuscationEngine:
         for x, y in self.TEST_PAIRS_2VAR:
             env = {v1: x, v2: y}
             try:
-                val = bool(eval(cleaned, {"__builtins__": {}}, env))
+                val = bool(_safe_eval_ast(cleaned, env))
                 outcomes.add(val)
             except Exception:
                 return OpaquePredicateResult(cleaned, "DYNAMIC", 0.0)

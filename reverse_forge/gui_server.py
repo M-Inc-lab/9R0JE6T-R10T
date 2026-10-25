@@ -1,18 +1,15 @@
 """
-R3V3R53//F0RG3  Interactive GUI Application Server (v9.0-sovereign)
-=====================================================================
-Phase 42 & 44 Upgrade: Modern Desktop/Web GUI Workbench outperforming legacy IDA Pro.
-Features:
-- Live dynamic binary loading & full analysis via `/api/analyze`, `/api/decompile`, `/api/inspect`, `/api/query`
-- Interactive draggable/zoomable Control-Flow Graph (CFG) visualizer
-- Synchronized Goto-Free C Pseudocode Decompiler with syntax highlighting
-- Multi-column synchronized Hex & 14-Format Data Inspector (ImHex-style live integer/float/timestamp/GUID/asm decoding)
-- Smart Binary Query Bar & CAPA Behavioral Capability Matrix (`ask` anything about the binary)
-- Bidirectional Cross-References (Xrefs) Explorer (`CALL`, `JMP`, `RIP`-relative string refs)
-- Mitigations & Checksec HUD + 12-Stage Pipeline Execution Panel
-- IDA Pro keybindings (Spacebar for Graph/Hex, F5 for Decompile, G for Jump, / for Filter)
-
-Zero external dependencies — runs on Python stdlib (http.server + json + urllib + webbrowser).
+R3V3R53//F0RG3  Interactive GUI Application Server (v10.0.0-zenith)
+===================================================================
+Phase 42, 44, 56 & 63 Upgrade: Hardened, Zero-Dependency Web & Desktop Workbench.
+Security & UX Features:
+- Strict localhost Origin/CSRF protection (blocks cross-origin local file reads)
+- Complete DOM XSS sanitization (`escHtml`) on all binary strings, symbols, and sections
+- Drag-and-Drop & One-Click HTML5 File Picker (`POST /api/upload`) + server path loader
+- Real binary CFG basic-block rendering (`/api/cfg` + `UnifiedDecompilerPipeline`)
+- Real binary Hex & ASCII rendering (`/api/hex`) + ImHex 14-Format Data Inspector Drawer
+- Interactive Debugger Toolbar (`Step F7`, `Continue F9`, `Breakpoint F2`)
+- Live Analyst Symbol Rename (`N`), Comment (`;`), `.h` C Header Export & 12-Stage Pipeline Runner
 """
 
 from __future__ import annotations
@@ -24,6 +21,7 @@ import os
 import socketserver
 import struct
 import sys
+import tempfile
 import threading
 import urllib.parse
 import webbrowser
@@ -36,6 +34,9 @@ from reverse_forge.elf_analyzer import ELFAnalyzer
 from reverse_forge.macho_analyzer import MachOAnalyzer
 from reverse_forge.decompiler_engine import MicroDecompilerEngine
 from reverse_forge.binary_intel_engine import BinaryIntelEngine
+from reverse_forge.unified_decompiler_pipeline import UnifiedDecompilerPipeline
+from reverse_forge.project_workspace_db import ProjectWorkspaceDB
+from reverse_forge.pipeline import PipelineStateMachine, AutonomyLevel
 
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -43,7 +44,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>9R0JE6T R10T // R3V3R53-F0RG3 Studio</title>
+<title>9R0JE6T R10T // R3V3R53-F0RG3 Studio v10.0-zenith</title>
 <style>
 :root {
   --bg-dark: #0a0e17;
@@ -81,15 +82,15 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: 0 14px;
   flex-shrink: 0;
-  gap: 12px;
+  gap: 10px;
 }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-logo {
   font-family: var(--font-mono);
   font-weight: 800;
-  font-size: 15px;
+  font-size: 14px;
   background: linear-gradient(135deg, var(--primary), var(--accent));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -105,9 +106,9 @@ header {
   border: 1px solid rgba(56, 189, 248, 0.3);
 }
 
-.nav-tabs { display: flex; gap: 4px; flex-wrap: nowrap; }
+.nav-tabs { display: flex; gap: 3px; flex-wrap: nowrap; }
 .nav-tab {
-  padding: 7px 12px;
+  padding: 6px 10px;
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -135,16 +136,29 @@ header {
   color: var(--text-muted);
 }
 
-.header-actions { display: flex; align-items: center; gap: 8px; }
+.sub-toolbar {
+  height: 38px;
+  background: #0d1320;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.toolbar-group { display: flex; align-items: center; gap: 6px; }
+
+.header-actions { display: flex; align-items: center; gap: 6px; }
 .query-bar {
   background: var(--bg-dark);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 5px 10px;
   color: var(--text-main);
   font-family: var(--font-mono);
   font-size: 12px;
-  width: 240px;
+  width: 220px;
 }
 .query-bar:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 2px var(--primary-glow); }
 
@@ -152,14 +166,14 @@ header {
   background: var(--bg-card);
   color: var(--text-main);
   border: 1px solid var(--border);
-  padding: 6px 12px;
-  font-size: 12px;
+  padding: 5px 10px;
+  font-size: 11px;
   font-weight: 600;
   border-radius: 6px;
   cursor: pointer;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
 }
 .btn:hover { background: var(--bg-hover); border-color: var(--primary); }
 .btn-primary { background: var(--primary); color: #04101e; border: none; }
@@ -168,7 +182,7 @@ header {
 .workspace { display: flex; flex: 1; overflow: hidden; }
 
 .sidebar {
-  width: 310px;
+  width: 300px;
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
   display: flex;
@@ -218,7 +232,7 @@ header {
 }
 .list-item:hover { background: var(--bg-hover); }
 .item-addr { color: var(--accent); font-size: 11px; }
-.item-name { color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 185px; }
+.item-name { color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
 
 .main-stage { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg-dark); position: relative; }
 .view-panel { display: none; flex: 1; height: 100%; width: 100%; overflow: hidden; }
@@ -227,10 +241,10 @@ header {
 .cfg-container {
   flex: 1;
   position: relative;
-  overflow: hidden;
+  overflow: auto;
   background: radial-gradient(circle at center, #111827 0%, #0a0e17 100%);
 }
-.cfg-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+.cfg-canvas { position: absolute; top: 0; left: 0; width: 2000px; height: 1600px; pointer-events: none; }
 .cfg-node {
   position: absolute;
   background: var(--bg-panel);
@@ -239,7 +253,7 @@ header {
   box-shadow: 0 10px 25px rgba(0,0,0,0.5);
   font-family: var(--font-mono);
   font-size: 12px;
-  min-width: 280px;
+  min-width: 270px;
 }
 .cfg-node-hdr {
   background: #1f2937;
@@ -250,13 +264,13 @@ header {
 }
 .cfg-node-body { padding: 8px 10px; line-height: 1.6; }
 .cfg-insn { display: flex; gap: 12px; }
-.cfg-mnem { color: #f43f5e; font-weight: 600; width: 48px; }
+.cfg-mnem { color: #f43f5e; font-weight: 600; width: 52px; }
 .cfg-ops { color: #e2e8f0; }
 
 .graph-controls {
-  position: absolute;
-  bottom: 20px;
-  right: 20px;
+  position: fixed;
+  bottom: 42px;
+  right: 24px;
   display: flex;
   gap: 6px;
   background: rgba(17, 24, 39, 0.85);
@@ -313,7 +327,7 @@ header {
 }
 .insp-row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .insp-key { color: var(--text-muted); }
-.insp-val { color: var(--primary); font-weight: 600; }
+.insp-val { color: var(--primary); font-weight: 600; text-align: right; max-width: 195px; overflow: hidden; text-overflow: ellipsis; }
 
 .hud-grid {
   flex: 1;
@@ -356,31 +370,51 @@ footer {
 .status-item strong { color: var(--text-main); }
 </style>
 </head>
-<body>
+<body ondragover="event.preventDefault()" ondrop="handleDropFile(event)">
 
 <header>
   <div class="brand">
     <div class="brand-logo">9R0JE6T R10T // R3V3R53-F0RG3</div>
     <span class="badge" id="binary-format-badge">PE x64</span>
-    <span style="font-size:12px;color:var(--text-muted)" id="binary-name-label">msedge.exe (Live Studio)</span>
+    <span style="font-size:12px;color:var(--text-muted)" id="binary-name-label">Drop or Upload Binary</span>
   </div>
 
   <nav class="nav-tabs">
     <button class="nav-tab active" onclick="switchView('cfg')"><span>⬡ Graph CFG</span> <kbd>Space</kbd></button>
-    <button class="nav-tab" onclick="switchView('decomp')"><span>⚙ Decompiled C</span> <kbd>F5</kbd></button>
+    <button class="nav-tab" onclick="switchView('decomp')"><span>⚙ 8-Pass Decompiled C</span> <kbd>F5</kbd></button>
     <button class="nav-tab" onclick="switchView('hex')"><span># Hex Inspector</span></button>
     <button class="nav-tab" onclick="switchView('intel')"><span>🧠 Capabilities & Ask</span></button>
     <button class="nav-tab" onclick="switchView('xrefs')"><span>🔗 Xrefs</span></button>
     <button class="nav-tab" onclick="switchView('hud')"><span>🛡 Mitigations HUD</span></button>
+    <button class="nav-tab" onclick="switchView('pipe')"><span>⚡ 12-Stage Pipeline</span></button>
   </nav>
 
   <div class="header-actions">
-    <input type="text" id="smart-query-input" class="query-bar" placeholder="Ask binary (e.g. network, crypto, 0x401000)..." onkeydown="if(event.key==='Enter')runSmartQuery()">
+    <input type="text" id="smart-query-input" class="query-bar" placeholder="Ask binary (network, compiler, 0x401000)..." onkeydown="if(event.key==='Enter')runSmartQuery()">
     <button class="btn" onclick="runSmartQuery()">Ask</button>
-    <button class="btn" onclick="promptJump()"><span>Go</span> <kbd>G</kbd></button>
-    <button class="btn btn-primary" onclick="loadSampleBinary()"><span>Open Binary</span></button>
+    <input type="file" id="file-upload-input" style="display:none" onchange="uploadBinaryFile(this.files[0])">
+    <button class="btn btn-primary" onclick="document.getElementById('file-upload-input').click()"><span>Upload Binary</span></button>
+    <button class="btn" onclick="loadSampleBinary()"><span>Open Path</span></button>
   </div>
 </header>
+
+<div class="sub-toolbar">
+  <div class="toolbar-group">
+    <span style="color:var(--text-muted);font-family:var(--font-mono);">DEBUGGER RSP:</span>
+    <button class="btn" onclick="debuggerStep()"><span>⏮ Step Into</span> <kbd>F7</kbd></button>
+    <button class="btn" onclick="debuggerContinue()"><span>▶ Continue</span> <kbd>F9</kbd></button>
+    <button class="btn" onclick="debuggerToggleBP()"><span>🔴 Breakpoint</span> <kbd>F2</kbd></button>
+    <span id="dbg-rip-badge" style="font-family:var(--font-mono);color:var(--success);margin-left:8px;">RIP: 0x00401000</span>
+  </div>
+  <div class="toolbar-group">
+    <button class="btn" onclick="promptRenameSymbol()"><span>✏ Rename Symbol</span> <kbd>N</kbd></button>
+    <button class="btn" onclick="promptAddComment()"><span>💬 Add Comment</span> <kbd>;</kbd></button>
+    <button class="btn" onclick="promptLivePatch()"><span>🩹 Live Patch Binary</span></button>
+    <button class="btn" onclick="runVulnAudit()"><span>🛡 CWE Vuln Scan</span></button>
+    <button class="btn" onclick="exportCHeader()"><span>⬇ Export .h Header</span></button>
+    <button class="btn" onclick="runFullPipeline()"><span>⚡ Execute 12-Stage Audit</span></button>
+  </div>
+</div>
 
 <div class="workspace">
   <aside class="sidebar">
@@ -453,13 +487,18 @@ footer {
     <div class="view-panel" id="view-hud">
       <div class="hud-grid" id="hud-grid"></div>
     </div>
+
+    <!-- 12-Stage Pipeline View -->
+    <div class="view-panel" id="view-pipe">
+      <div class="code-view" id="pipeline-content" style="padding:20px;">Click "⚡ Execute 12-Stage Audit" in the toolbar to run the full autonomous vulnerability & remediation pipeline on the loaded binary.</div>
+    </div>
   </main>
 </div>
 
 <footer>
   <div class="status-left">
-    <div class="status-item">Engine: <strong>R3V3R53//F0RG3 v9.0-sovereign</strong></div>
-    <div class="status-item">Internal Engines: <strong>47 Ready</strong></div>
+    <div class="status-item">Engine: <strong>R3V3R53//F0RG3 v10.0-zenith</strong></div>
+    <div class="status-item">Internal Engines: <strong>63 Ready</strong></div>
     <div class="status-item">Current VA: <strong id="status-va">0x00401000</strong></div>
   </div>
   <div class="status-right">
@@ -469,6 +508,16 @@ footer {
 </footer>
 
 <script>
+// Strict HTML entity sanitizer to prevent DOM XSS from untrusted binary strings/symbols
+function escHtml(val) {
+  return String(val == null ? '' : val)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 let appData = {
   binaryPath: "",
   format: "PE",
@@ -476,22 +525,17 @@ let appData = {
   entryPoint: "0x11d430",
   functions: [
     { name: "entry", addr: "0x11d430", size: 64, type: "entry" },
-    { name: "parse_command_line", addr: "0x11d500", size: 128, type: "sub" },
-    { name: "initialize_sandbox", addr: "0x11d620", size: 256, type: "sub" },
     { name: "setup_security_guards", addr: "0x11d800", size: 96, type: "sub" }
   ],
   strings: [
-    { value: "https://edge.microsoft.com", type: "urls", addr: "0x3be410" },
-    { value: "--enable-features=msEdgeSecurity", type: "general", addr: "0x3be520" }
+    { value: "https://edge.microsoft.com", type: "urls", addr: "0x3be410" }
   ],
   sections: [
-    { name: ".text", vaddr: "0x1000", vsize: 3917845, entropy: 6.51, perms: "R-X" },
-    { name: ".rdata", vaddr: "0x3be000", vsize: 572456, entropy: 5.54, perms: "R--" }
+    { name: ".text", vaddr: "0x1000", vsize: 3917845, entropy: 6.51, perms: "R-X" }
   ],
   mitigations: {
     "Address Space Layout Randomization (ASLR)": { pass: true, val: "Enabled (High-Entropy VA 64-bit)" },
-    "Data Execution Prevention (DEP / NX)": { pass: true, val: "Enforced (Hardware NX Bit)" },
-    "Control Flow Guard (CFG)": { pass: true, val: "Bitmap Instrumented & Guarded" }
+    "Data Execution Prevention (DEP / NX)": { pass: true, val: "Enforced (Hardware NX Bit)" }
   },
   capabilities: [
     { capability_id: "CAP-NET-001", name: "Perform Network Socket / HTTP Communication", mitre_attack: "T1071.001", severity: "MEDIUM", matched_indicators: ["string:https://edge.microsoft.com"], description: "Outbound/inbound network communication indicators." }
@@ -499,13 +543,19 @@ let appData = {
   xrefs: [
     { from_va: "0x11d43a", to_va: "0x11d800", xref_type: "CALL_REL32", instruction: "call 0x11d800", resolved_target_preview: "setup_security_guards" }
   ],
+  cfgBlocks: [
+    {
+      id: 0, x: 240, y: 40, label: "entry_main: 0x11d430",
+      insns: [{ mnem: "push", ops: "rbp" }, { mnem: "mov", ops: "rbp, rsp" }, { mnem: "call", ops: "setup_security_guards" }, { mnem: "ret", ops: "" }],
+      successors: []
+    }
+  ],
+  hexRows: [],
   pseudocode: [
-    "// Decompiled with R3V3R53//F0RG3 Native Region-Structured Decompiler",
+    "// Decompiled with R3V3R53//F0RG3 8-Pass Unified Decompiler Pipeline",
     "int entry_main(long arg1, long arg2, long arg3) {",
     "    int var_eax = 0;",
-    "    if (arg1 != 0) {",
-    "        var_eax = setup_security_guards();",
-    "    }",
+    "    var_eax = setup_security_guards();",
     "    return var_eax;",
     "}"
   ]
@@ -539,23 +589,23 @@ function renderSidebar() {
     appData.functions.filter(f => f.name.toLowerCase().includes(filter) || f.addr.includes(filter)).forEach(f => {
       const el = document.createElement('div');
       el.className = 'list-item';
-      el.innerHTML = `<span class="item-name">${f.name}</span><span class="item-addr">${f.addr}</span>`;
-      el.onclick = () => jumpToAddress(f.addr, f.name);
+      el.innerHTML = `<span class="item-name">${escHtml(f.name)}</span><span class="item-addr">${escHtml(f.addr)}</span>`;
+      el.onclick = () => jumpToAddress(f.addr);
       container.appendChild(el);
     });
   } else if (activeSidebarTab === 'strings') {
     appData.strings.filter(s => s.value.toLowerCase().includes(filter)).forEach(s => {
       const el = document.createElement('div');
       el.className = 'list-item';
-      el.innerHTML = `<span class="item-name" title="${s.value}">"${s.value}"</span><span class="item-addr">${s.addr}</span>`;
-      el.onclick = () => jumpToAddress(s.addr, s.value);
+      el.innerHTML = `<span class="item-name" title="${escHtml(s.value)}">"${escHtml(s.value)}"</span><span class="item-addr">${escHtml(s.addr)}</span>`;
+      el.onclick = () => jumpToAddress(s.addr);
       container.appendChild(el);
     });
   } else if (activeSidebarTab === 'sections') {
     appData.sections.forEach(s => {
       const el = document.createElement('div');
       el.className = 'list-item';
-      el.innerHTML = `<span class="item-name"><strong>${s.name}</strong> (${s.perms || 'R-X'})</span><span class="item-addr">${s.vaddr || s.virtual_address || '0x0'}</span>`;
+      el.innerHTML = `<span class="item-name"><strong>${escHtml(s.name)}</strong> (${escHtml(s.perms || 'R-X')})</span><span class="item-addr">${escHtml(s.vaddr || s.virtual_address || '0x0')}</span>`;
       container.appendChild(el);
     });
   }
@@ -565,9 +615,10 @@ function renderDecomp() {
   const container = document.getElementById('code-content');
   container.innerHTML = '';
   appData.pseudocode.forEach((line, idx) => {
-    let colored = line
-      .replace(/\b(int64_t|uint64_t|int32_t|int|long|void)\b/g, '<span class="type">$1</span>')
-      .replace(/\b(if|else|while|switch|case|break|return|__fastcall)\b/g, '<span class="kw">$1</span>')
+    let safeLine = escHtml(line);
+    let colored = safeLine
+      .replace(/\b(int64_t|uint64_t|int32_t|uint32_t|uint16_t|uint8_t|int|long|void|typedef|struct)\b/g, '<span class="type">$1</span>')
+      .replace(/\b(if|else|while|do|switch|case|default|break|return|__fastcall)\b/g, '<span class="kw">$1</span>')
       .replace(/(\b0x[0-9a-fA-F]+\b|\b\d+\b)/g, '<span class="num">$1</span>');
     const row = document.createElement('div');
     row.className = 'code-line';
@@ -579,8 +630,21 @@ function renderDecomp() {
 function renderHexView() {
   const container = document.getElementById('hex-rows');
   container.innerHTML = '';
+  if (appData.hexRows && appData.hexRows.length > 0) {
+    appData.hexRows.forEach(hr => {
+      const row = document.createElement('div');
+      row.className = 'hex-row';
+      const bytesSpans = (hr.bytes || []).map(bHex => {
+        const decVal = parseInt(bHex, 16) || 0;
+        return `<span class="hex-byte" onmouseover="updateHoverByte('0x${escHtml(bHex)}', ${decVal})" onclick="inspectByteOffset('${escHtml(hr.offset)}')">${escHtml(bHex)}</span>`;
+      }).join('');
+      row.innerHTML = `<div class="hex-offset">${escHtml(hr.offset)}</div><div class="hex-bytes">${bytesSpans}</div><div class="hex-ascii">${escHtml(hr.ascii)}</div>`;
+      container.appendChild(row);
+    });
+    return;
+  }
   const baseVA = 0x00401000;
-  for (let r = 0; r < 32; r++) {
+  for (let r = 0; r < 24; r++) {
     const rowVA = baseVA + (r * 16);
     const rowHex = '0x' + rowVA.toString(16).padStart(8, '0');
     let bytesHTML = '';
@@ -594,7 +658,7 @@ function renderHexView() {
     }
     const row = document.createElement('div');
     row.className = 'hex-row';
-    row.innerHTML = `<div class="hex-offset">${rowHex}</div><div class="hex-bytes">${bytesHTML}</div><div class="hex-ascii">${asciiText}</div>`;
+    row.innerHTML = `<div class="hex-offset">${rowHex}</div><div class="hex-bytes">${bytesHTML}</div><div class="hex-ascii">${escHtml(asciiText)}</div>`;
     container.appendChild(row);
   }
 }
@@ -622,7 +686,7 @@ function inspectByteOffset(offsetHex) {
           ['ASCII String', ins.ascii_string],
           ['Disassembly', (ins.disassembly_preview || []).join(' ; ')]
         ];
-        container.innerHTML = fields.map(([k, v]) => `<div class="insp-row"><span class="insp-key">${k}</span><span class="insp-val">${v}</span></div>`).join('');
+        container.innerHTML = fields.map(([k, v]) => `<div class="insp-row"><span class="insp-key">${escHtml(k)}</span><span class="insp-val">${escHtml(v)}</span></div>`).join('');
       }
     });
 }
@@ -638,9 +702,9 @@ function renderCapabilitiesAndIntel(customResults) {
     const val = cap.mitre_attack || cap.matched_value || cap.value || cap.capability_id || '';
     const desc = cap.description || JSON.stringify(cap);
     card.innerHTML = `
-      <div class="hud-title">${cap.capability_id || cap.section_name || 'INTEL'}</div>
-      <div class="hud-val" style="color:var(--primary)">${title}</div>
-      <div class="hud-desc"><strong>${val}</strong><br>${desc}</div>
+      <div class="hud-title">${escHtml(cap.capability_id || cap.section_name || 'INTEL')}</div>
+      <div class="hud-val" style="color:var(--primary)">${escHtml(title)}</div>
+      <div class="hud-desc"><strong>${escHtml(val)}</strong><br>${escHtml(desc)}</div>
     `;
     grid.appendChild(card);
   });
@@ -649,7 +713,7 @@ function renderCapabilitiesAndIntel(customResults) {
 function renderXrefs() {
   const container = document.getElementById('xrefs-content');
   const rows = (appData.xrefs || []).map((x, idx) =>
-    `<div class="code-line"><div class="code-num">${idx + 1}</div><div class="code-text">${x.from_va}  [${x.xref_type}]  ${x.instruction.padEnd(28)} -> ${x.to_va} (${x.resolved_target_preview || ''})</div></div>`
+    `<div class="code-line"><div class="code-num">${idx + 1}</div><div class="code-text">${escHtml(x.from_va)}  [${escHtml(x.xref_type)}]  ${escHtml(x.instruction.padEnd(28))} -> ${escHtml(x.to_va)} (${escHtml(x.resolved_target_preview || '')})</div></div>`
   );
   container.innerHTML = rows.join('') || '<div style="color:var(--text-muted)">No cross-references extracted yet.</div>';
 }
@@ -663,9 +727,9 @@ function renderMitigationsHUD() {
     const card = document.createElement('div');
     card.className = `hud-card ${isPass ? 'pass' : 'fail'}`;
     card.innerHTML = `
-      <div class="hud-title">${title}</div>
+      <div class="hud-title">${escHtml(title)}</div>
       <div class="hud-val" style="color:${isPass ? 'var(--success)' : 'var(--danger)'}">${isPass ? '✓ ENABLED' : '✗ ABSENT'}</div>
-      <div class="hud-desc">${descVal}</div>
+      <div class="hud-desc">${escHtml(descVal)}</div>
     `;
     grid.appendChild(card);
   }
@@ -677,59 +741,34 @@ function renderCFGGraph() {
   nodesLayer.innerHTML = '';
   linksLayer.innerHTML = '';
 
-  const blocks = [
-    {
-      id: 0, x: 260, y: 40, label: `entry: ${appData.entryPoint}`,
-      insns: [
-        { mnem: "push", ops: "rbp" },
-        { mnem: "mov", ops: "rbp, rsp" },
-        { mnem: "call", ops: "setup_security_guards" },
-        { mnem: "test", ops: "eax, eax" },
-        { mnem: "jz", ops: "loc_error_exit" }
-      ],
-      targets: [ { id: 1, type: "true" }, { id: 2, type: "false" } ]
-    },
-    {
-      id: 1, x: 80, y: 240, label: "loc_verified_body",
-      insns: [
-        { mnem: "lea", ops: "rcx, [rsp+0x20]" },
-        { mnem: "call", ops: "dispatch_main" },
-        { mnem: "ret", ops: "" }
-      ],
-      targets: []
-    },
-    {
-      id: 2, x: 440, y: 240, label: "loc_error_exit",
-      insns: [
-        { mnem: "mov", ops: "eax, 0xFFFFFFFF" },
-        { mnem: "ret", ops: "" }
-      ],
-      targets: []
-    }
-  ];
+  const blocks = (appData.cfgBlocks && appData.cfgBlocks.length > 0) ? appData.cfgBlocks : [];
+  const addrToBlock = {};
+  blocks.forEach(b => { if (b.addr) addrToBlock[b.addr.toLowerCase()] = b; });
 
   blocks.forEach(b => {
     const nodeEl = document.createElement('div');
     nodeEl.className = 'cfg-node';
-    nodeEl.style.left = b.x + 'px';
-    nodeEl.style.top = b.y + 'px';
-    let insnHTML = b.insns.map(i => `<div class="cfg-insn"><span class="cfg-mnem">${i.mnem}</span><span class="cfg-ops">${i.ops}</span></div>`).join('');
-    nodeEl.innerHTML = `<div class="cfg-node-hdr">${b.label}</div><div class="cfg-node-body">${insnHTML}</div>`;
+    nodeEl.style.left = (b.x || 120) + 'px';
+    nodeEl.style.top = (b.y || 40) + 'px';
+    let insnHTML = (b.insns || []).map(i => `<div class="cfg-insn"><span class="cfg-mnem">${escHtml(i.mnem)}</span><span class="cfg-ops">${escHtml(i.ops)}</span></div>`).join('');
+    nodeEl.innerHTML = `<div class="cfg-node-hdr">${escHtml(b.label)}</div><div class="cfg-node-body">${insnHTML}</div>`;
     nodesLayer.appendChild(nodeEl);
   });
 
   blocks.forEach(b => {
-    b.targets.forEach(t => {
-      const targetBlock = blocks.find(x => x.id === t.id);
+    (b.successors || []).forEach((succAddr, idx) => {
+      const targetBlock = addrToBlock[String(succAddr).toLowerCase()];
       if (targetBlock) {
-        const x1 = b.x + 140, y1 = b.y + 115, x2 = targetBlock.x + 140, y2 = targetBlock.y;
-        const color = t.type === 'true' ? '#22c55e' : (t.type === 'false' ? '#ef4444' : '#38bdf8');
+        const x1 = (b.x || 120) + 135, y1 = (b.y || 40) + 115;
+        const x2 = (targetBlock.x || 120) + 135, y2 = (targetBlock.y || 40);
+        const color = idx === 0 ? '#22c55e' : '#ef4444';
+        const marker = idx === 0 ? 'arrow-true' : 'arrow-false';
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         path.setAttribute('d', `M ${x1} ${y1} C ${x1} ${(y1+y2)/2}, ${x2} ${(y1+y2)/2}, ${x2} ${y2}`);
         path.setAttribute('stroke', color);
         path.setAttribute('stroke-width', '2');
         path.setAttribute('fill', 'none');
-        path.setAttribute('marker-end', `url(#arrow-${t.type})`);
+        path.setAttribute('marker-end', `url(#${marker})`);
         linksLayer.appendChild(path);
       }
     });
@@ -761,6 +800,121 @@ function resetGraphZoom() {
   currentZoom = 1.0;
   document.getElementById('cfg-nodes-layer').style.transform = `scale(1.0)`;
   document.getElementById('cfg-links-layer').style.transform = `scale(1.0)`;
+}
+
+function debuggerStep() {
+  fetch('/api/debug?action=step').then(r => r.json()).then(d => {
+    document.getElementById('status-va').innerText = d.snapshot.rip;
+    document.getElementById('dbg-rip-badge').innerText = 'RIP: ' + d.snapshot.rip;
+  });
+}
+function debuggerContinue() {
+  fetch('/api/debug?action=continue').then(r => r.json()).then(d => {
+    document.getElementById('status-va').innerText = d.snapshot.rip;
+    document.getElementById('dbg-rip-badge').innerText = 'RIP: ' + d.snapshot.rip;
+  });
+}
+function debuggerToggleBP() {
+  const curVa = document.getElementById('status-va').innerText;
+  fetch('/api/debug?action=bp&addr=' + encodeURIComponent(curVa)).then(r => r.json()).then(d => {
+    document.getElementById('dbg-rip-badge').innerText = `BP @ ${curVa} (${d.snapshot.active_breakpoints.length} active)`;
+  });
+}
+
+function promptRenameSymbol() {
+  const addr = prompt("Enter symbol address to rename:", appData.entryPoint);
+  if (!addr) return;
+  const newName = prompt("Enter new function name:", "decrypt_config_packet");
+  if (!newName) return;
+  fetch('/api/annotate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ action: 'rename', address: addr, value: newName, path: appData.binaryPath })
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      if (appData.binaryPath) loadBinaryFromServer(appData.binaryPath);
+    }
+  });
+}
+
+function promptAddComment() {
+  const addr = prompt("Enter address for comment:", appData.entryPoint);
+  if (!addr) return;
+  const cmt = prompt("Enter analyst comment:", "Verified bounds check");
+  if (!cmt) return;
+  fetch('/api/annotate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ action: 'comment', address: addr, value: cmt, path: appData.binaryPath })
+  });
+}
+
+async function promptLivePatch() {
+  if (!appData.currentBinaryPath) return;
+  const off = prompt("Enter file offset to patch (e.g. 0x40):", "0x40");
+  if (!off) return;
+  const op = prompt("Patch operation (nop, invert, ret0, ret1):", "nop");
+  if (!op) return;
+  const r = await fetch(`/api/patch?path=${encodeURIComponent(appData.currentBinaryPath)}`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({offset: off, operation: op})
+  });
+  const d = await r.json();
+  if (d.status === "ok" && d.patched_path) {
+    loadBinaryFromServer(d.patched_path);
+  }
+}
+
+async function runVulnAudit() {
+  if (!appData.currentBinaryPath) return;
+  document.getElementById("smart-query-input").value = "vulnerabilities";
+  await runSmartQuery();
+}
+
+function exportCHeader() {
+  window.open('/api/export-header', '_blank');
+}
+
+function runFullPipeline() {
+  if (!appData.binaryPath) {
+    alert("Upload or open a binary first to run the 12-stage audit pipeline.");
+    return;
+  }
+  switchView('pipe');
+  document.getElementById('pipeline-content').innerText = "Running 12-stage autonomous pipeline...";
+  fetch('/api/pipeline?path=' + encodeURIComponent(appData.binaryPath))
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'ok') {
+        document.getElementById('pipeline-content').innerText = d.markdown_report;
+      }
+    });
+}
+
+function uploadBinaryFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(evt) {
+    fetch('/api/upload?filename=' + encodeURIComponent(file.name), {
+      method: 'POST',
+      body: evt.target.result
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'ok' && data.saved_path) {
+        loadBinaryFromServer(data.saved_path);
+      }
+    });
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function handleDropFile(evt) {
+  evt.preventDefault();
+  if (evt.dataTransfer && evt.dataTransfer.files && evt.dataTransfer.files.length > 0) {
+    uploadBinaryFile(evt.dataTransfer.files[0]);
+  }
 }
 
 function runSmartQuery() {
@@ -802,7 +956,9 @@ function loadBinaryFromServer(path) {
         appData.capabilities = d.capabilities || [];
         appData.xrefs = d.top_xrefs || [];
         appData.mitigations = d.mitigations || {};
-        appData.pseudocode = (d.structured_goto_free_c || d.decompiled_entry_c || '').split('\n');
+        appData.cfgBlocks = d.cfg_blocks || appData.cfgBlocks;
+        appData.hexRows = d.hex_rows || [];
+        appData.pseudocode = (d.unified_decompiled_c || d.structured_goto_free_c || d.decompiled_entry_c || '').split('\n');
         const urls = (d.categorized_strings && d.categorized_strings.urls) || [];
         const gen = (d.categorized_strings && d.categorized_strings.general) || [];
         appData.strings = [...urls, ...gen].slice(0, 50).map((s, i) => ({ value: s, addr: '0x' + (0x2000 + i * 16).toString(16) }));
@@ -815,7 +971,7 @@ function loadBinaryFromServer(path) {
 }
 
 function loadSampleBinary() {
-  const path = prompt("Enter binary path to analyze:", appData.binaryPath || "/bin/ls");
+  const path = prompt("Enter server binary path to analyze:", appData.binaryPath || "/bin/ls");
   if (path) loadBinaryFromServer(path);
 }
 
@@ -843,23 +999,24 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === 'g' || e.key === 'G') {
     e.preventDefault();
     promptJump();
+  } else if (e.key === 'n' || e.key === 'N') {
+    e.preventDefault();
+    promptRenameSymbol();
+  } else if (e.key === ';') {
+    e.preventDefault();
+    promptAddComment();
   } else if (e.key === '/') {
     e.preventDefault();
     document.getElementById('filter-input').focus();
   } else if (e.key === 'F7') {
     e.preventDefault();
-    fetch('/api/debug?action=step').then(r => r.json()).then(d => {
-      document.getElementById('status-va').innerText = d.snapshot.rip;
-    });
+    debuggerStep();
   } else if (e.key === 'F8' || e.key === 'F9') {
     e.preventDefault();
-    fetch('/api/debug?action=continue').then(r => r.json()).then(d => {
-      document.getElementById('status-va').innerText = d.snapshot.rip;
-    });
+    debuggerContinue();
   } else if (e.key === 'F2') {
     e.preventDefault();
-    const curVa = document.getElementById('status-va').innerText;
-    fetch('/api/debug?action=bp&addr=' + encodeURIComponent(curVa));
+    debuggerToggleBP();
   }
 });
 
@@ -876,14 +1033,120 @@ window.addEventListener('DOMContentLoaded', () => {
 
 
 class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
-    """Zero-dependency REST API & Web GUI server for R3V3R53//F0RG3."""
+    """Hardened, zero-dependency REST API & Web GUI server for R3V3R53//F0RG3."""
 
     default_binary_path: Optional[str] = None
+    project_db: ProjectWorkspaceDB = ProjectWorkspaceDB()
+    active_debugger: Any = None
+    MAX_UPLOAD_BYTES: int = 32 * 1024 * 1024
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
 
+    def _is_trusted_origin(self) -> bool:
+        """Block cross-origin browser requests from external websites (SEC-03)."""
+        origin = self.headers.get("Origin", "")
+        if not origin:
+            return True
+        parsed = urllib.parse.urlparse(origin)
+        return parsed.hostname in ("127.0.0.1", "localhost", "::1")
+
+    def do_POST(self) -> None:
+        if not self._is_trusted_origin():
+            self._json_response({"status": "error", "error": "Forbidden cross-origin request"}, status=403)
+            return
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        content_len = int(self.headers.get("Content-Length", "0"))
+        if content_len <= 0 or content_len > self.MAX_UPLOAD_BYTES:
+            self._json_response({"status": "error", "error": "Invalid or oversized payload"}, status=400)
+            return
+
+        raw_body = self.rfile.read(content_len)
+
+        if path == "/api/upload":
+            raw_fname = query.get("filename", ["uploaded.bin"])[0]
+            safe_fname = "".join(c if (c.isalnum() or c in "._-") else "_" for c in os.path.basename(raw_fname)) or "uploaded.bin"
+            upload_dir = os.path.join(tempfile.gettempdir(), "reverse_forge_uploads")
+            os.makedirs(upload_dir, exist_ok=True)
+            saved_path = os.path.join(upload_dir, safe_fname)
+            with open(saved_path, "wb") as f:
+                f.write(raw_body)
+            self._json_response({
+                "status": "ok",
+                "filename": safe_fname,
+                "saved_path": saved_path,
+                "size_bytes": len(raw_body),
+            })
+            return
+
+        elif path == "/api/annotate":
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                act = payload.get("action", "")
+                addr = payload.get("address", "0x401000")
+                val = payload.get("value", "")
+                if act == "rename":
+                    new_sym = self.project_db.rename_symbol(addr, val)
+                    self._json_response({"status": "ok", "action": "rename", "address": addr, "symbol": new_sym})
+                    return
+                elif act == "comment":
+                    self.project_db.set_comment(addr, val)
+                    self._json_response({"status": "ok", "action": "comment", "address": addr, "comment": val})
+                    return
+            except Exception as e:
+                self._json_response({"status": "error", "error": str(e)}, status=400)
+                return
+
+        elif path == "/api/patch":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            try:
+                from reverse_forge.binary_patcher import BinaryPatcherEngine
+                payload = json.loads(raw_body.decode("utf-8"))
+                off_s = str(payload.get("offset", "0x0"))
+                file_off = int(off_s, 16) if off_s.lower().startswith("0x") else int(off_s, 10)
+                op = str(payload.get("operation", "nop")).lower()
+                with open(bin_path, "rb") as f:
+                    orig_data = f.read(self.MAX_UPLOAD_BYTES)
+                patcher = BinaryPatcherEngine(orig_data)
+                if op == "nop":
+                    tx = patcher.nop_range(file_off, int(payload.get("length", 1)))
+                elif op == "invert":
+                    tx = patcher.invert_conditional_branch(file_off)
+                elif op == "ret0":
+                    tx = patcher.patch_function_return(file_off, return_value=0)
+                elif op == "ret1":
+                    tx = patcher.patch_function_return(file_off, return_value=1)
+                else:
+                    raw_hex = str(payload.get("hex_bytes", "90"))
+                    tx = patcher.apply_raw_patch(file_off, bytes.fromhex(raw_hex), description="Web UI patch")
+                patch_dir = os.path.join(tempfile.gettempdir(), "reverse_forge_uploads")
+                os.makedirs(patch_dir, exist_ok=True)
+                patched_path = os.path.join(patch_dir, "patched_" + os.path.basename(bin_path))
+                summary = patcher.save_patched_binary(patched_path)
+                self._json_response({
+                    "status": "ok",
+                    "patched_path": patched_path,
+                    "transaction": asdict(tx),
+                    "summary": asdict(summary),
+                })
+                return
+            except Exception as e:
+                self._json_response({"status": "error", "error": str(e)}, status=400)
+                return
+
+        self._json_response({"error": "Endpoint not found"}, status=404)
+
     def do_GET(self) -> None:
+        if not self._is_trusted_origin():
+            self._json_response({"status": "error", "error": "Forbidden cross-origin request"}, status=403)
+            return
+
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
@@ -899,10 +1162,35 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             self._json_response({
                 "status": "ready",
                 "engine": "R3V3R53//F0RG3",
-                "version": "9.0.0-sovereign",
-                "active_engines": 62,
+                "version": "11.0.0-eternal",
+                "active_engines": 64,
                 "default_binary": self.default_binary_path,
             })
+            return
+
+        elif path == "/api/vulns":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            with open(bin_path, "rb") as f:
+                data = f.read(4 * 1024 * 1024)
+            intel = BinaryIntelEngine(data, filepath=bin_path)
+            dos = intel.get_full_dossier()
+            self._json_response({
+                "status": "ok",
+                "vulnerabilities_count": dos.get("vulnerabilities_count", 0),
+                "risk_rating": dos.get("vulnerability_risk_rating", "CLEAN"),
+                "vulnerabilities": dos.get("vulnerabilities", []),
+            })
+            return
+
+        elif path == "/api/export-header":
+            hdr_text = self.project_db.export_c_header()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(hdr_text.encode("utf-8"))
             return
 
         elif path == "/api/load":
@@ -933,12 +1221,72 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 with open(bin_path, "rb") as f:
                     data = f.read(4 * 1024 * 1024)
                 intel = BinaryIntelEngine(data, filepath=bin_path)
+                dossier = intel.get_full_dossier()
+                if self.project_db.symbol_renames:
+                    dossier["unified_decompiled_c"] = self.project_db.apply_annotations_to_c_code(
+                        dossier.get("unified_decompiled_c", "")
+                    )
                 self._json_response({
                     "status": "ok",
-                    "dossier": intel.get_full_dossier(),
+                    "dossier": dossier,
                 })
             except Exception as e:
                 self._json_response({"status": "error", "error": str(e)}, status=500)
+            return
+
+        elif path == "/api/hex":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            offset_str = query.get("offset", ["0x0"])[0]
+            rows_cnt = min(64, int(query.get("rows", ["32"])[0]))
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            with open(bin_path, "rb") as f:
+                data = f.read(4 * 1024 * 1024)
+            start_off = int(offset_str, 16) if offset_str.startswith("0x") else int(offset_str, 10)
+            start_off = max(0, min(len(data), start_off))
+            hex_rows = []
+            for r in range(rows_cnt):
+                off = start_off + r * 16
+                if off >= len(data):
+                    break
+                chunk = data[off : off + 16]
+                hex_rows.append({
+                    "offset": f"0x{off:08x}",
+                    "bytes": [f"{b:02X}" for b in chunk],
+                    "ascii": "".join(chr(b) if 0x20 <= b <= 0x7E else "." for b in chunk),
+                })
+            self._json_response({"status": "ok", "hex_rows": hex_rows})
+            return
+
+        elif path == "/api/cfg":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            with open(bin_path, "rb") as f:
+                data = f.read(1048576)
+            intel = BinaryIntelEngine(data, filepath=bin_path)
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, intel.metadata)
+            res = UnifiedDecompilerPipeline().decompile_function_bytes(code_slice, base_va=entry_va or 0x401000)
+            self._json_response({"status": "ok", "cfg_blocks": res.cfg_blocks, "c_code": res.final_c_code})
+            return
+
+        elif path == "/api/pipeline":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            with tempfile.TemporaryDirectory() as tmpdir:
+                pipe = PipelineStateMachine(
+                    artifact_path=bin_path,
+                    workspace_dir=tmpdir,
+                    authorized_scope="*",
+                    autonomy_level=AutonomyLevel.LEVEL_3_AUTONOMOUS_STATIC,
+                )
+                pipe.run_all_stages()
+                st = pipe.get_pipeline_state()
+                self._json_response({"status": "ok", "markdown_report": st["report_markdown"], "stages": st["stages"]})
             return
 
         elif path == "/api/inspect":
@@ -977,8 +1325,10 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             from reverse_forge.gdb_rsp_debugger import GDBRSPClient
             action = query.get("action", ["status"])[0]
             addr_s = query.get("addr", ["0x401000"])[0]
-            dbg = GDBRSPClient(simulated=True)
-            dbg.connect()
+            if GUIWorkbenchHandler.active_debugger is None or action == "reset":
+                GUIWorkbenchHandler.active_debugger = GDBRSPClient(simulated=True)
+                GUIWorkbenchHandler.active_debugger.connect()
+            dbg = GUIWorkbenchHandler.active_debugger
             if action == "step":
                 snap = dbg.step_into()
             elif action == "continue":
@@ -1017,12 +1367,13 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                       else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
             )
             code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
-            dfunc = MicroDecompilerEngine().decompile_raw_bytes(code_slice, base_addr=entry_va or 0x401000)
+            uni = UnifiedDecompilerPipeline().decompile_function_bytes(code_slice, base_va=entry_va or 0x401000)
             self._json_response({
                 "status": "ok",
-                "c_source": dfunc.c_source,
-                "complexity": dfunc.complexity_score,
-                "blocks_count": dfunc.total_blocks,
+                "c_source": uni.final_c_code,
+                "complexity": len(uni.cfg_blocks),
+                "blocks_count": len(uni.cfg_blocks),
+                "cfg_blocks": uni.cfg_blocks,
             })
             return
 
@@ -1031,7 +1382,10 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
     def _json_response(self, data: Dict[str, Any], status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # SEC-03: Only emit Access-Control-Allow-Origin for verified localhost origins
+        origin = self.headers.get("Origin", "")
+        if origin and self._is_trusted_origin():
+            self.send_header("Access-Control-Allow-Origin", origin)
         self.end_headers()
         self.wfile.write(json.dumps(data).encode("utf-8"))
 
@@ -1053,8 +1407,8 @@ def start_gui_workbench(port: int = 8080, open_browser: bool = True, binary_path
         url += f"/?path={urllib.parse.quote(os.path.abspath(binary_path))}"
 
     print(f"\n  ╔════════════════════════════════════════════════════════════════════╗")
-    print(f"  ║   9R0JE6T R10T // R3V3R53-F0RG3  Interactive GUI Workbench v7.0   ║")
-    print(f"  ║   Live CFG, Goto-Free C, 14-Type Data Inspector & Smart Query      ║")
+    print(f"  ║   9R0JE6T R10T // R3V3R53-F0RG3  Interactive GUI Workbench v10.0  ║")
+    print(f"  ║   Hardened XSS/CORS · Drag-Drop Upload · Live 8-Pass Decompiler    ║")
     print(f"  ║   URL: {url:<54}║")
     print(f"  ╚════════════════════════════════════════════════════════════════════╝\n")
 

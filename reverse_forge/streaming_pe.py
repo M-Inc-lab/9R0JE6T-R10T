@@ -123,7 +123,7 @@ class StreamingPEAnalyzer:
     def calculate_hashes_streaming(self) -> Dict[str, str]:
         """Compute SHA256 and MD5 using 64KB streaming blocks."""
         sha256 = hashlib.sha256()
-        md5 = hashlib.md5()
+        md5 = hashlib.md5(usedforsecurity=False, )
         with open(self.filepath, "rb") as f:
             while chunk := f.read(65536):
                 sha256.update(chunk)

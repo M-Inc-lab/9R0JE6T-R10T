@@ -176,7 +176,7 @@ class TestPhase50ProjectWorkspaceDBAndOmniscientCLI(unittest.TestCase):
             capture_output=True, text=True, check=True,
         )
         doc_json = json.loads(doc.stdout)
-        self.assertIn(doc_json["version"], ("8.0.0-omniscient", "9.0.0-sovereign"))
+        self.assertIn(doc_json["version"], ("8.0.0-omniscient", "9.0.0-sovereign", "10.0.0-zenith", "11.0.0-eternal"))
         self.assertGreaterEqual(doc_json["phases_implemented"], 50)
         self.assertGreaterEqual(doc_json["internal_engines_count"], 53)
 

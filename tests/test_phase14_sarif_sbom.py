@@ -78,16 +78,13 @@ class TestPhase14SARIFAndSBOM(unittest.TestCase):
 
     def test_end_to_end_pipeline_sarif_and_sbom_on_ls(self):
         if os.path.exists("/bin/ls"):
-            with open("/bin/ls", "rb") as f:
-                header = f.read(4)
-            if header == b"\x7fELF":
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    sm = PipelineStateMachine("/bin/ls", autonomy_level=AutonomyLevel.AUTONOMOUS, workspace_dir=tmpdir)
-                    state = sm.run_all()
-                    sarif = SARIFExporter.to_sarif(state)
-                    cdx = CycloneDXExporter.to_cyclonedx(state, static_metadata=sm.static_metadata)
-                    self.assertGreaterEqual(len(sarif["runs"][0]["results"]), 1)
-                    self.assertGreaterEqual(len(cdx["components"]), 1)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                sm = PipelineStateMachine("/bin/ls", autonomy_level=AutonomyLevel.AUTONOMOUS, workspace_dir=tmpdir)
+                state = sm.run_all()
+                sarif = SARIFExporter.to_sarif(state)
+                cdx = CycloneDXExporter.to_cyclonedx(state, static_metadata=sm.static_metadata)
+                self.assertGreaterEqual(len(sarif["runs"][0]["results"]), 1)
+                self.assertGreaterEqual(len(cdx["components"]), 1)
 
 
 if __name__ == "__main__":

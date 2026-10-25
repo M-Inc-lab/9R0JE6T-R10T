@@ -134,7 +134,7 @@ class CompilerPackerProfiler:
                 )
             )
 
-        rich_hash = hashlib.md5(bytes(decrypted_block)).hexdigest()
+        rich_hash = hashlib.md5(bytes(decrypted_block), usedforsecurity=False).hexdigest()
         return RichHeaderReport(
             present=True,
             xor_key=f"0x{xor_key:08x}",
@@ -166,7 +166,7 @@ class CompilerPackerProfiler:
                     dll_part = dll_part[: -len(ext)]
             normalized.append(f"{dll_part}.{fn_part}")
         joined = ",".join(normalized)
-        return hashlib.md5(joined.encode("utf-8")).hexdigest()
+        return hashlib.md5(joined.encode("utf-8"), usedforsecurity=False).hexdigest()
 
     @staticmethod
     def compute_fuzzy_block_digest(data: bytes, buckets: int = 16) -> str:

@@ -1,0 +1,11 @@
+# ============================================================================
+# R3V3R53//F0RG3 (9R0JE6T-R10T v11.1.0-eternal) — Deterministic Lockfile
+# Generated for reproducible DevOps & CI verification (PATCH 4)
+# ============================================================================
+pefile==2023.2.7
+capstone==5.0.1
+z3-solver==4.13.0.0
+fastmcp==0.4.1
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.2

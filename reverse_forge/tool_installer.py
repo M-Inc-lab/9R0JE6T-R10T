@@ -203,8 +203,41 @@ class ToolchainInstaller:
                 return {"success": True, "installed": True, "type": "pip"}
             return {"success": False, "error": res.stderr.decode("utf-8", errors="ignore")}
 
+    def ensure_unpacking_tools(self) -> Dict[str, Any]:
+        """Automatically checks and installs required system utilities for layer unpacking."""
+        needed_bins = {
+            "7z": ["p7zip-full", "7z"],
+            "unsquashfs": ["squashfs-tools"],
+            "dumpimage": ["u-boot-tools"],
+            "binwalk": ["binwalk"]
+        }
+        status: Dict[str, Any] = {}
+        missing_pkgs = []
+        for cmd, pkgs in needed_bins.items():
+            found = shutil.which(cmd) is not None
+            status[cmd] = {"available": found}
+            if not found:
+                missing_pkgs.extend(pkgs)
+
+        if missing_pkgs and self.os_type == "linux":
+            print(f"[*] Auto-installing missing unpacking utilities: {missing_pkgs}...")
+            try:
+                # Attempt apt-get installation if running with sudo or as root
+                cmd = ["apt-get", "install", "-y"] + list(set(missing_pkgs))
+                if hasattr(os, "geteuid") and os.geteuid() != 0:
+                    cmd = ["sudo", "-n"] + cmd
+                res = subprocess.run(cmd, capture_output=True)
+                for c in needed_bins:
+                    status[c]["available"] = (shutil.which(c) is not None)
+                status["auto_install_attempted"] = True
+                status["install_returncode"] = res.returncode
+            except Exception as e:
+                status["auto_install_error"] = str(e)
+
+        return status
+
     def bootstrap_all(self) -> Dict[str, Any]:
-        """Run complete self-installation of required disassemblers and helper tools."""
+        """Run complete self-installation of required disassemblers, unpacking tools, and bindings."""
         results = {}
         status = self.detect_all()
 
@@ -214,4 +247,6 @@ class ToolchainInstaller:
             results["radare2"] = {"success": True, "message": "Already present", "path": status["radare2"]["path"]}
 
         results["capstone"] = self.install_capstone_disassembler()
+        results["unpacking_tools"] = self.ensure_unpacking_tools()
         return results
+

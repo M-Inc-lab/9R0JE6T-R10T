@@ -631,6 +631,26 @@ class BinaryIntelEngine:
         dfunc = decomp.decompile_raw_bytes(code_slice, base_addr=base_va)
         insns = decomp._fallback_decode_x86(code_slice[:256], base_va)
         structured = decomp.decompile_structured(insns, func_name="entry_main")
+        from reverse_forge.unified_decompiler_pipeline import UnifiedDecompilerPipeline
+        from reverse_forge.vuln_scanner_engine import BinaryVulnerabilityScannerEngine
+        arch_str = str(self.metadata.get("architecture", "x64"))
+        uni_res = UnifiedDecompilerPipeline(arch=arch_str).decompile_function_bytes(code_slice, base_va=base_va)
+        vuln_rep = BinaryVulnerabilityScannerEngine().scan_binary(
+            self.binary_bytes,
+            imported_symbols=self.metadata.get("imported_symbols", []),
+            sections=self.metadata.get("sections", []),
+            mitigations=self.metadata.get("mitigations", {}),
+            instructions=insns,
+        )
+        hex_rows = []
+        for r_idx in range(min(32, (len(self.binary_bytes) + 15) // 16)):
+            off = r_idx * 16
+            chunk = self.binary_bytes[off : off + 16]
+            hex_rows.append({
+                "offset": f"0x{off:08x}",
+                "bytes": [f"{b:02X}" for b in chunk],
+                "ascii": "".join(chr(b) if 0x20 <= b <= 0x7E else "." for b in chunk),
+            })
 
         return {
             "artifact": os.path.abspath(self.filepath) if os.path.exists(self.filepath) else self.filepath,
@@ -648,6 +668,9 @@ class BinaryIntelEngine:
             "exported_symbols": self.metadata.get("exported_symbols", [])[:100],
             "capabilities_count": len(caps),
             "capabilities": [asdict(c) for c in caps],
+            "vulnerabilities_count": vuln_rep.total_findings,
+            "vulnerability_risk_rating": vuln_rep.overall_risk_rating,
+            "vulnerabilities": [asdict(v) for v in vuln_rep.findings],
             "cpp_classes_recovered": rtti.total_classes_recovered,
             "cpp_classes": [asdict(c) for c in rtti.classes[:20]],
             "categorized_strings": {
@@ -656,6 +679,9 @@ class BinaryIntelEngine:
             "top_xrefs": [asdict(x) for x in xrefs],
             "decompiled_entry_c": dfunc.c_source,
             "structured_goto_free_c": structured.structured_c,
+            "unified_decompiled_c": uni_res.final_c_code,
+            "cfg_blocks": uni_res.cfg_blocks,
+            "hex_rows": hex_rows,
             "compiler_packer_profile": asdict(
                 __import__("reverse_forge.compiler_packer_profiler", fromlist=["CompilerPackerProfiler"])
                 .CompilerPackerProfiler()
@@ -779,6 +805,26 @@ class BinaryIntelEngine:
                 summary_answer=f"Recovered {s_rep.total_recovered} obfuscated/stack string(s).",
                 total_matches=s_rep.total_recovered,
                 results=[asdict(x) for x in s_rep.recovered_strings],
+            )
+
+        # 4c-bis. Vulnerability / CWE / Exploitability query
+        if any(w in ql for w in ("vuln", "vulnerability", "vulnerabilities", "cwe", "cve", "overflow", "uaf", "use-after-free", "double free", "format string", "rwx")):
+            from reverse_forge.vuln_scanner_engine import BinaryVulnerabilityScannerEngine
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(self.binary_bytes, self.metadata)
+            insns = MicroDecompilerEngine()._fallback_decode_x86(code_slice[:256], entry_va or 0x401000)
+            v_rep = BinaryVulnerabilityScannerEngine().scan_binary(
+                self.binary_bytes,
+                imported_symbols=self.metadata.get("imported_symbols", []),
+                sections=self.metadata.get("sections", []),
+                mitigations=self.metadata.get("mitigations", {}),
+                instructions=insns,
+            )
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="CWE_VULNERABILITY_AUDIT",
+                summary_answer=f"Identified {v_rep.total_findings} CWE vulnerability finding(s) (Overall Risk: {v_rep.overall_risk_rating}).",
+                total_matches=v_rep.total_findings,
+                results=[asdict(f) for f in v_rep.findings],
             )
 
         # 4d. Direct Syscalls query
