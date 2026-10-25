@@ -20,6 +20,14 @@ class ManagedConnection(sqlite3.Connection):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.persistent: bool = False
+        self.is_closed: bool = False
+
+    def close(self) -> None:
+        self.is_closed = True
+        try:
+            super().close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "ManagedConnection":
         super().__enter__()
@@ -42,26 +50,28 @@ class ArtifactKnowledgeBase:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        if self._conn is not None:
+        if self._conn is not None and not self._conn.is_closed:
             return self._conn
         conn = sqlite3.connect(self.db_path, factory=ManagedConnection)
         conn.row_factory = sqlite3.Row
+        self._conn = conn
         return conn
 
     def close(self) -> None:
         """Close any cached or persistent database connection."""
         if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
+            if not self._conn.is_closed:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
             self._conn = None
 
     def __enter__(self) -> "ArtifactKnowledgeBase":
-        if self._conn is None:
+        if self._conn is None or self._conn.is_closed:
             self._conn = sqlite3.connect(self.db_path, factory=ManagedConnection)
             self._conn.row_factory = sqlite3.Row
-            self._conn.persistent = True
+        self._conn.persistent = True
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
