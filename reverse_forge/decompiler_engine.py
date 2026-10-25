@@ -288,3 +288,49 @@ class MicroDecompilerEngine:
         structurer = ControlFlowRegionStructurer()
         return structurer.structure_cfg(cfg, func_name=func_name)
 
+    def _fallback_decode_x86(self, code_bytes: bytes, base_addr: int = 0x401000) -> List[Tuple[int, str, str]]:
+        instructions: List[Tuple[int, str, str]] = []
+        idx = 0
+        limit = min(len(code_bytes), 256)
+        while idx < limit:
+            addr = base_addr + idx
+            b0 = code_bytes[idx]
+            if code_bytes[idx:idx + 4] == b"\xf3\x0f\x1e\xfa":
+                instructions.append((addr, "endbr64", ""))
+                idx += 4
+            elif b0 == 0x55:
+                instructions.append((addr, "push", "rbp"))
+                idx += 1
+            elif b0 == 0x5D:
+                instructions.append((addr, "pop", "rbp"))
+                idx += 1
+            elif code_bytes[idx:idx + 3] in (b"\x48\x89\xe5", b"\x89\xe5"):
+                step = 3 if code_bytes[idx] == 0x48 else 2
+                instructions.append((addr, "mov", "rbp, rsp"))
+                idx += step
+            elif code_bytes[idx:idx + 2] == b"\x31\xc0":
+                instructions.append((addr, "xor", "eax, eax"))
+                idx += 2
+            elif b0 in (0xC3, 0xCB):
+                instructions.append((addr, "ret", ""))
+                break
+            elif b0 == 0xE8 and idx + 5 <= limit:
+                rel = int.from_bytes(code_bytes[idx + 1:idx + 5], "little", signed=True)
+                target = (addr + 5 + rel) & 0xFFFFFFFFFFFFFFFF
+                instructions.append((addr, "call", hex(target)))
+                idx += 5
+            elif b0 == 0xEB and idx + 2 <= limit:
+                rel = int.from_bytes(code_bytes[idx + 1:idx + 2], "little", signed=True)
+                instructions.append((addr, "jmp", hex(addr + 2 + rel)))
+                idx += 2
+            elif 0x70 <= b0 <= 0x7F and idx + 2 <= limit:
+                rel = int.from_bytes(code_bytes[idx + 1:idx + 2], "little", signed=True)
+                jcc_map = {0x74: "je", 0x75: "jne", 0x7C: "jl", 0x7D: "jge", 0x7E: "jle", 0x7F: "jg"}
+                mn = jcc_map.get(b0, "jne")
+                instructions.append((addr, mn, hex(addr + 2 + rel)))
+                idx += 2
+            else:
+                instructions.append((addr, "nop", ""))
+                idx += 1
+        return instructions
+

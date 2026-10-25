@@ -1,0 +1,80 @@
+{
+  "experiment_id": "EXP-1792773527",
+  "target_artifact": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  "target_size_bytes": 5438320,
+  "control": {
+    "name": "Variant A (Control: In-Memory PEAnalyzer)",
+    "sample_size": 5,
+    "latencies_ms": [
+      1562.5847,
+      1571.6909,
+      1574.0236,
+      1495.2153,
+      1496.2082
+    ],
+    "mean_latency_ms": 1539.9445,
+    "median_latency_ms": 1562.5847,
+    "std_dev_ms": 40.6059,
+    "variance_ms": 1648.8407,
+    "min_latency_ms": 1495.2153,
+    "max_latency_ms": 1574.0236,
+    "p95_latency_ms": 1574.0236,
+    "p99_latency_ms": 1574.0236,
+    "throughput_mb_s": 3.37,
+    "peak_memory_kb": 4388.46,
+    "metadata_summary": {
+      "sections_count": 12,
+      "architecture": "x64 (64-bit AMD64)",
+      "entry_point": "0x11d430",
+      "format": null
+    }
+  },
+  "treatment": {
+    "name": "Variant B (Treatment: StreamingPEAnalyzer mmap)",
+    "sample_size": 5,
+    "latencies_ms": [
+      1257.1154,
+      1187.7384,
+      1142.2482,
+      1171.5329,
+      1126.8069
+    ],
+    "mean_latency_ms": 1177.0884,
+    "median_latency_ms": 1171.5329,
+    "std_dev_ms": 50.7215,
+    "variance_ms": 2572.6689,
+    "min_latency_ms": 1126.8069,
+    "max_latency_ms": 1257.1154,
+    "p95_latency_ms": 1257.1154,
+    "p99_latency_ms": 1257.1154,
+    "throughput_mb_s": 4.41,
+    "peak_memory_kb": 5342.55,
+    "metadata_summary": {
+      "sections_count": 12,
+      "architecture": "x64 (64-bit AMD64)",
+      "entry_point": "0x11d430",
+      "format": "PE"
+    }
+  },
+  "guardrails": {
+    "passed": true,
+    "checks": {
+      "architecture_match": true,
+      "section_count_match": true,
+      "entry_point_match": true,
+      "pe_signature_match": true
+    },
+    "mismatches": []
+  },
+  "t_statistic": 12.4878,
+  "degrees_of_freedom": 7.63,
+  "p_value": 0.00031,
+  "cohens_d": 7.898,
+  "ci_95_lower_ms": 295.8509,
+  "ci_95_upper_ms": 429.8613,
+  "speedup_ratio": 1.31,
+  "latency_reduction_pct": 23.56,
+  "memory_reduction_pct": -21.74,
+  "statistically_significant": true,
+  "winner": "Variant B (Treatment: StreamingPEAnalyzer)"
+}

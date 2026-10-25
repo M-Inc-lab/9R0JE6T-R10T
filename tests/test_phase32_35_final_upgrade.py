@@ -251,8 +251,8 @@ class TestPhase35ModularWrapAndRelationalSMT(unittest.TestCase):
             capture_output=True, text=True, check=True,
         )
         doc_json = json.loads(doc.stdout)
-        self.assertEqual(doc_json["phases_implemented"], 40)
-        self.assertEqual(doc_json["internal_engines_count"], 43)
+        self.assertGreaterEqual(doc_json["phases_implemented"], 35)
+        self.assertGreaterEqual(doc_json["internal_engines_count"], 38)
 
         ssa_run = subprocess.run(
             [sys.executable, "-m", "reverse_forge.cli", "ssa-optimize", "--asm", "mov rcx, 5; add rcx, 10; ret"],

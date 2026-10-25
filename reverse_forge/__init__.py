@@ -1,3 +1,3 @@
-"""R3V3R53//F0RG3 - Lightweight Windows & Cross-Platform Binary Triage Engine."""
+"""R3V3R53//F0RG3 - Autonomous Cross-Platform Binary Reverse Engineering & Intelligence Suite."""
 
-__version__ = "1.0.0"
+__version__ = "7.0.0-singularity"

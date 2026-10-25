@@ -344,6 +344,58 @@ def main():
     td_p.add_argument("--div-addrs", required=True, help="Comma-separated hex addresses for divergent trace (e.g. '0x401000,0x401004,0x401020')")
     td_p.add_argument("--output", "-o", help="Optional path to write JSON differential trace report")
 
+    # streaming-triage (Phase 41: Zero-Copy Memory-Mapped Streaming PE Analyzer)
+    str_triage_p = subparsers.add_parser("streaming-triage", help="Zero-copy memory-mapped streaming PE triage for large binaries")
+    str_triage_p.add_argument("--input", "-i", required=True, help="Target PE binary artifact")
+    str_triage_p.add_argument("--output", "-o", help="Optional path to write JSON metadata report")
+
+    # ab-bench (Phase 41: Statistical A/B Benchmarking & Optimization Testing)
+    ab_p = subparsers.add_parser("ab-bench", help="Run empirical A/B statistical hypothesis test comparing triage variants")
+    ab_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    ab_p.add_argument("--trials", "-n", type=int, default=10, help="Number of benchmark trials per variant (default: 10)")
+    ab_p.add_argument("--warmup", type=int, default=2, help="Number of warmup trials (default: 2)")
+    ab_p.add_argument("--output", "-o", help="Optional path to write JSON A/B experiment report")
+    ab_p.add_argument("--output-md", help="Optional path to write Markdown A/B report")
+
+    # gui (Phase 42: Modern Interactive Reverse Engineering Workbench)
+    gui_p = subparsers.add_parser("gui", help="Launch the IDA Pro-beating interactive GUI Workbench application")
+    gui_p.add_argument("--input", "-i", help="Initial binary artifact path to load")
+    gui_p.add_argument("--port", "-p", type=int, default=8080, help="Local HTTP server port (default: 8080)")
+    gui_p.add_argument("--no-browser", action="store_true", help="Do not automatically launch web browser")
+
+    # dossier (Phase 43: Unified Executive & Technical Binary Intelligence Dossier)
+    dos_p = subparsers.add_parser("dossier", help="Generate unified one-stop executive & technical binary intelligence dossier")
+    dos_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    dos_p.add_argument("--output", "-o", help="Optional path to write JSON dossier")
+
+    # capabilities (Phase 43: CAPA-Style Behavioral Capability & MITRE ATT&CK Matcher)
+    cap_p = subparsers.add_parser("capabilities", help="Detect behavioral capabilities and map to MITRE ATT&CK / MBC")
+    cap_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    cap_p.add_argument("--output", "-o", help="Optional path to write JSON capability report")
+
+    # xrefs (Phase 43: Bidirectional CALL, JMP & RIP-Relative String Cross-References)
+    xr_p = subparsers.add_parser("xrefs", help="Extract CALL, JMP, and RIP-relative LEA/MOV cross-references")
+    xr_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    xr_p.add_argument("--output", "-o", help="Optional path to write JSON xrefs report")
+
+    # inspect (Phase 43: ImHex-Style 14-Format Data Inspector at any Offset or VA)
+    ins_p = subparsers.add_parser("inspect", help="Decode 14 data types (ints, floats, timestamps, GUID, asm) at any offset/VA")
+    ins_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    ins_p.add_argument("--offset", default="0x0", help="File offset or Virtual Address (e.g. 0x401000 or 64)")
+    ins_p.add_argument("--output", "-o", help="Optional path to write JSON inspection report")
+
+    # ask (Phase 43: Smart Natural/Keyword/Address Binary Query Engine)
+    ask_p = subparsers.add_parser("ask", help="Query the binary for any capability, symbol, string, or address (e.g. 'network', 'crypto', '0x401000')")
+    ask_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    ask_p.add_argument("--query", "-q", required=True, help="Question, keyword, symbol, hex pattern, or address")
+    ask_p.add_argument("--output", "-o", help="Optional path to write JSON query answer")
+
+    # desktop-app (Phase 45: Cross-Platform Native Desktop Studio Application)
+    app_p = subparsers.add_parser("desktop-app", help="Launch Cross-Platform Native Desktop Studio (Tkinter Dark IDE or Chromeless App Window)")
+    app_p.add_argument("--input", "-i", help="Optional binary artifact to load on startup")
+    app_p.add_argument("--mode", choices=["tk", "app-window", "headless-json"], default="tk", help="Desktop UI mode")
+    app_p.add_argument("--output", "-o", help="Optional output file when running in headless-json mode")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -760,11 +812,13 @@ def main():
             "DistributedCorpusClusteringEngine", "SSALifterAndOptimizer",
             "ControlFlowRegionStructurer", "DatalogVSAEngine",
             "DeobfuscationEngine", "CppRTTIEngine", "FirmwareBaseEngine",
-            "UnwindFrameEngine", "TraceDiffEngine",
+            "UnwindFrameEngine", "TraceDiffEngine", "StreamingPEAnalyzer",
+            "BinaryABBenchmarker", "GUIWorkbenchServer", "BinaryIntelEngine",
+            "DesktopAppStudio",
         ]
         report = {
-            "version": "5.0.0-omega",
-            "phases_implemented": 40,
+            "version": "7.0.0-singularity",
+            "phases_implemented": 45,
             "internal_engines_count": len(internal_engines),
             "internal_engines_status": "ALL_READY",
             "external_toolchains": {
@@ -1031,6 +1085,100 @@ def main():
         ]
         rep = TraceDiffEngine().align_and_diff_traces(base_steps, div_steps)
         _write_or_print(asdict(rep), args.output, "Differential Execution Trace Alignment")
+
+    elif args.command == "streaming-triage":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.streaming_pe import StreamingPEAnalyzer
+        rep = StreamingPEAnalyzer(args.input).analyze(include_hashes=True)
+        _write_or_print(asdict(rep), args.output, "Streaming PE Triage")
+
+    elif args.command == "ab-bench":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.ab_benchmarker import BinaryABBenchmarker
+        bench = BinaryABBenchmarker(args.input, trials=args.trials, warmup_runs=args.warmup)
+        print(f"[*] Executing A/B Statistical Benchmark on {args.input} (N={bench.trials} trials, warmup={bench.warmup_runs})...")
+        rep = bench.run_experiment()
+        rep_dict = asdict(rep)
+        del rep_dict["summary_markdown"]
+
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(rep_dict, f, indent=2)
+            print(f"[+] JSON A/B report saved to {args.output}")
+
+        if args.output_md:
+            with open(args.output_md, "w", encoding="utf-8") as f:
+                f.write(rep.summary_markdown)
+            print(f"[+] Markdown A/B report saved to {args.output_md}")
+
+        if not args.output and not args.output_md:
+            print("\n" + rep.summary_markdown)
+
+    elif args.command == "gui":
+        from reverse_forge.gui_server import start_gui_workbench
+        start_gui_workbench(port=args.port, open_browser=(not args.no_browser), binary_path=args.input)
+
+    elif args.command == "dossier":
+        _require_existing_file(args.input)
+        from reverse_forge.binary_intel_engine import BinaryIntelEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        dossier = BinaryIntelEngine(data, filepath=args.input).get_full_dossier()
+        _write_or_print(dossier, args.output, "Binary Executive & Technical Dossier")
+
+    elif args.command == "capabilities":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.binary_intel_engine import BinaryIntelEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        intel = BinaryIntelEngine(data, filepath=args.input)
+        caps = [asdict(c) for c in intel.detect_capabilities()]
+        _write_or_print({"artifact": os.path.abspath(args.input), "capabilities_count": len(caps), "capabilities": caps}, args.output, "CAPA Behavioral Capabilities")
+
+    elif args.command == "xrefs":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.binary_intel_engine import BinaryIntelEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        intel = BinaryIntelEngine(data, filepath=args.input)
+        xrefs = [asdict(x) for x in intel.extract_all_xrefs()]
+        _write_or_print({"artifact": os.path.abspath(args.input), "xrefs_count": len(xrefs), "xrefs": xrefs}, args.output, "Cross-References Report")
+
+    elif args.command == "inspect":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.binary_intel_engine import BinaryIntelEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        intel = BinaryIntelEngine(data, filepath=args.input)
+        insp = intel.inspect_offset(args.offset)
+        _write_or_print(asdict(insp), args.output, "14-Format Data Inspector")
+
+    elif args.command == "ask":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.binary_intel_engine import BinaryIntelEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        intel = BinaryIntelEngine(data, filepath=args.input)
+        ans = intel.smart_query(args.query)
+        _write_or_print(asdict(ans), args.output, "Smart Binary Query")
+
+    elif args.command == "desktop-app":
+        from dataclasses import asdict
+        from reverse_forge.desktop_app import build_desktop_workspace_model, launch_chromeless_app_window, launch_native_tk_ide
+        if args.mode == "headless-json":
+            model = build_desktop_workspace_model(args.input)
+            _write_or_print(asdict(model), args.output, "Desktop Studio Workspace Model")
+        elif args.mode == "app-window":
+            if not launch_chromeless_app_window(args.input):
+                launch_native_tk_ide(args.input)
+        else:
+            launch_native_tk_ide(args.input)
 
 
 if __name__ == "__main__":
