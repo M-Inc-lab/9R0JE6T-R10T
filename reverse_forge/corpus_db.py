@@ -4,11 +4,12 @@ Recursively scans directories or extracted firmware filesystems for executable a
 executes the 12-stage pipeline, and indexes all findings and hashes into a local SQLite database.
 """
 
+import contextlib
 import json
 import os
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Iterator
 
 from reverse_forge.correlation_engine import CorrelationEngine
 from reverse_forge.pipeline import AutonomyLevel, PipelineStateMachine
@@ -21,10 +22,15 @@ class ArtifactKnowledgeBase:
         self.db_path = os.path.abspath(db_path)
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
