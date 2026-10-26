@@ -13,3 +13,7 @@ reverse_forge_v1_complete_all_phases.zip
 
 # IDE & Editor files
 .vscode/
+
+# Build & Test artifacts
+rust_core/target/
+.pytest_cache/

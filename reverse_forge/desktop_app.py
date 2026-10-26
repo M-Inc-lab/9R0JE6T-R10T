@@ -202,7 +202,7 @@ def launch_native_tk_ide(binary_path: Optional[str] = None) -> None:
             print(json.dumps(asdict(model), indent=2))
         return
 
-    root.title("9R0JE6T R10T // R3V3R53-F0RG3 Cross-Platform Desktop Studio (v11.0.0-eternal)")
+    root.title("9R0JE6T R10T // R3V3R53-F0RG3 Cross-Platform Desktop Studio (v26.0.0-rust-bicentennial)")
     root.geometry("1360x840")
     root.configure(bg="#0a0e17")
 
@@ -318,7 +318,7 @@ def launch_native_tk_ide(binary_path: Optional[str] = None) -> None:
         m: DesktopWorkspaceModel = state["model"]
         status_var.set(
             f"Target: {m.filename}  |  Format: {m.format_name} ({m.architecture})  |  "
-            f"Entry: {m.entry_point}  |  SHA-256: {m.sha256[:24]}...  |  64 Internal Engines Ready"
+            f"Entry: {m.entry_point}  |  SHA-256: {m.sha256[:24]}...  |  118 Internal Engines Ready"
         )
 
         # Populate Treeview

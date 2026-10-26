@@ -28,6 +28,7 @@ from reverse_forge.deobfuscation_engine import DeobfuscationEngine
 from reverse_forge.decompiler_engine import MicroDecompilerEngine
 from reverse_forge.region_structurer import ControlFlowRegionStructurer
 from reverse_forge.struct_recovery_engine import StructLayoutRecoveryEngine
+from reverse_forge.abi_frame_recovery_engine import ABIAndStackFrameEngine
 
 
 @dataclass
@@ -45,6 +46,10 @@ class UnifiedDecompilationResult:
     inferred_structs: List[Dict[str, Any]]
     cfg_blocks: List[Dict[str, Any]]
     final_c_code: str
+    calling_convention: str = "MS_X64_FASTCALL"
+    stack_frame_size_bytes: int = 0
+    recovered_prototype: str = ""
+    local_stack_variables: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class UnifiedDecompilerPipeline:
@@ -132,7 +137,10 @@ class UnifiedDecompilerPipeline:
         unflat = DeobfuscationEngine().unflatten_ollvm_cfg(cfg)
         struct_rep = ControlFlowRegionStructurer().structure_cfg(unflat.blocks, func_name=func_name)
 
-        # Pass 8: Struct Layout Inference & Pointer-Offset AST Rewriting (`ptr->field_XX`)
+        # Pass 8: ABI Calling Convention, Function Prototype & Stack-Frame Variable Recovery
+        abi_sig = ABIAndStackFrameEngine().recover_function_abi(ins_tuples, func_name=func_name, arch=self.arch)
+
+        # Pass 9: Struct Layout Inference & Pointer-Offset AST Rewriting (`ptr->field_XX`)
         asm_and_c_lines = [f"{m} {o}".strip() for _, m, o in ins_tuples] + struct_rep.structured_c.splitlines()
         inferred_structs, _ = StructLayoutRecoveryEngine().recover_structs_from_code(
             asm_and_c_lines,
@@ -198,4 +206,8 @@ class UnifiedDecompilerPipeline:
             inferred_structs=[asdict(s) for s in inferred_structs],
             cfg_blocks=cfg_blocks_out,
             final_c_code=full_c,
+            calling_convention=abi_sig.calling_convention,
+            stack_frame_size_bytes=abi_sig.stack_frame_size_bytes,
+            recovered_prototype=abi_sig.c_prototype,
+            local_stack_variables=[asdict(lv) for lv in abi_sig.local_variables],
         )

@@ -409,8 +409,11 @@ footer {
   <div class="toolbar-group">
     <button class="btn" onclick="promptRenameSymbol()"><span>✏ Rename Symbol</span> <kbd>N</kbd></button>
     <button class="btn" onclick="promptAddComment()"><span>💬 Add Comment</span> <kbd>;</kbd></button>
+    <button class="btn" onclick="runCPUEmulation()"><span>🚀 Emulate Entry (CPU)</span></button>
     <button class="btn" onclick="promptLivePatch()"><span>🩹 Live Patch Binary</span></button>
     <button class="btn" onclick="runVulnAudit()"><span>🛡 CWE Vuln Scan</span></button>
+    <button class="btn" onclick="runYaraGenerator()"><span>🧬 Generate YARA/SIGMA</span></button>
+    <button class="btn" onclick="runLayer2Bridge()"><span>🌉 Layer-2 Bridge</span></button>
     <button class="btn" onclick="exportCHeader()"><span>⬇ Export .h Header</span></button>
     <button class="btn" onclick="runFullPipeline()"><span>⚡ Execute 12-Stage Audit</span></button>
   </div>
@@ -849,6 +852,24 @@ function promptAddComment() {
   });
 }
 
+async function runYaraGenerator() {
+  if (!appData.currentBinaryPath) return;
+  document.getElementById("smart-query-input").value = "yara";
+  await runSmartQuery();
+}
+
+async function runLayer2Bridge() {
+  if (!appData.currentBinaryPath) return;
+  document.getElementById("smart-query-input").value = "bridge";
+  await runSmartQuery();
+}
+
+async function runCPUEmulation() {
+  if (!appData.currentBinaryPath) return;
+  document.getElementById("smart-query-input").value = "emulate";
+  await runSmartQuery();
+}
+
 async function promptLivePatch() {
   if (!appData.currentBinaryPath) return;
   const off = prompt("Enter file offset to patch (e.g. 0x40):", "0x40");
@@ -1162,10 +1183,162 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             self._json_response({
                 "status": "ready",
                 "engine": "R3V3R53//F0RG3",
-                "version": "11.0.0-eternal",
-                "active_engines": 64,
+                "version": "26.0.0-rust-bicentennial",
+                "active_engines": 87,
                 "default_binary": self.default_binary_path,
             })
+            return
+
+        elif path == "/api/pcap":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid path"}, status=400)
+                return
+            from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
+            with open(bin_path, "rb") as f:
+                data = f.read(8 * 1024 * 1024)
+            rep = OmniToolkit16CatEngine().dissect_pcap_and_infer_protocol(data)
+            self._json_response({"status": "ok", "pcap_report": asdict(rep)})
+            return
+
+        elif path == "/api/imhex":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            pat = query.get("pattern", ["struct Header { u16 magic; u16 cblp; u32 reserved; };"])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid path"}, status=400)
+                return
+            from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
+            with open(bin_path, "rb") as f:
+                data = f.read(1048576)
+            fields = OmniToolkit16CatEngine().evaluate_imhex_pattern(data, pat, 0)
+            self._json_response({"status": "ok", "fields": [asdict(x) for x in fields]})
+            return
+
+        elif path == "/api/rust-bench":
+            from reverse_forge.native_rust_bridge import NativeRustAccelerator
+            rep = NativeRustAccelerator.benchmark_rust_vs_python(262144)
+            self._json_response({"status": "ok", "rust_benchmark": asdict(rep)})
+            return
+
+        elif path == "/api/force-exec":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            from reverse_forge.underconstrained_visor_engine import UnderConstrainedMicroVisor
+            with open(bin_path, "rb") as f:
+                data = f.read(1048576)
+            intel = BinaryIntelEngine(data, filepath=bin_path)
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, intel.metadata)
+            v_rep = UnderConstrainedMicroVisor(base_va=entry_va or 0x401000).force_execute_function(code_slice[:512])
+            self._json_response({"status": "ok", "visor_report": asdict(v_rep)})
+            return
+
+        elif path == "/api/decompile-fuse":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            from reverse_forge.multi_decompiler_fusion_engine import MultiDecompilerFusionEngine
+            with open(bin_path, "rb") as f:
+                data = f.read(1048576)
+            intel = BinaryIntelEngine(data, filepath=bin_path)
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, intel.metadata)
+            f_rep = MultiDecompilerFusionEngine().decompile_with_fusion(code_slice, base_va=entry_va or 0x401000)
+            self._json_response({"status": "ok", "fusion_report": asdict(f_rep)})
+            return
+
+        elif path == "/api/memory-dump":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            from reverse_forge.live_memory_dump_engine import LiveMemoryAndDumpEngine
+            with open(bin_path, "rb") as f:
+                data = f.read(16 * 1024 * 1024)
+            m_rep = LiveMemoryAndDumpEngine().analyze_dump(data)
+            self._json_response({"status": "ok", "dump_report": asdict(m_rep)})
+            return
+
+        elif path == "/api/yara":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            from reverse_forge.yara_sigma_ioc_generator import YaraSigmaIOCGenerator
+            with open(bin_path, "rb") as f:
+                data = f.read(4 * 1024 * 1024)
+            intel = BinaryIntelEngine(data, filepath=bin_path)
+            code_slice, _ = CorrelationEngine._resolve_disassembly_slice(data, intel.metadata)
+            bundle = YaraSigmaIOCGenerator().generate_all(data, intel.get_full_dossier(), code_slice=code_slice)
+            self._json_response({"status": "ok", "detection_bundle": asdict(bundle)})
+            return
+
+        elif path == "/api/bridge":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            from reverse_forge.tier2_bridge_exporter import Tier2BridgeExporter
+            with open(bin_path, "rb") as f:
+                data = f.read(4 * 1024 * 1024)
+            intel = BinaryIntelEngine(data, filepath=bin_path)
+            pkg = Tier2BridgeExporter().export_bridge_package(
+                intel.get_full_dossier(),
+                symbol_renames=self.project_db.symbol_renames,
+                analyst_comments=self.project_db.comments,
+            )
+            self._json_response({"status": "ok", "bridge_package": asdict(pkg)})
+            return
+
+        elif path == "/api/container":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            from reverse_forge.archive_container_triage_engine import ArchiveContainerTriageEngine
+            with open(bin_path, "rb") as f:
+                data = f.read(16 * 1024 * 1024)
+            rep = ArchiveContainerTriageEngine().triage_container(data)
+            self._json_response({"status": "ok", "container_report": asdict(rep)})
+            return
+
+        elif path == "/api/emulate":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            from reverse_forge.cpu_emulator_engine import DeterministicCPUEmulator
+            with open(bin_path, "rb") as f:
+                data = f.read(1048576)
+            intel = BinaryIntelEngine(data, filepath=bin_path)
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, intel.metadata)
+            emu_rep = DeterministicCPUEmulator(base_va=entry_va or 0x401000).emulate_bytes(code_slice[:512], max_steps=64)
+            self._json_response({"status": "ok", "emulation": asdict(emu_rep)})
+            return
+
+        elif path == "/api/bytecode":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            from reverse_forge.bytecode_clr_dex_wasm_engine import BytecodeManagedEngine
+            with open(bin_path, "rb") as f:
+                data = f.read(4 * 1024 * 1024)
+            bc_rep = BytecodeManagedEngine().analyze_binary(data)
+            self._json_response({"status": "ok", "bytecode": asdict(bc_rep)})
+            return
+
+        elif path == "/api/config-extract":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            from reverse_forge.config_crypto_extractor import ConfigAndCryptoExtractorEngine
+            with open(bin_path, "rb") as f:
+                data = f.read(4 * 1024 * 1024)
+            cfg_rep = ConfigAndCryptoExtractorEngine().extract_all(data)
+            self._json_response({"status": "ok", "config_crypto": asdict(cfg_rep)})
             return
 
         elif path == "/api/vulns":

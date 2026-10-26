@@ -23,6 +23,10 @@ class CorrelationEngine:
             return "PE"
         if len(data) >= 4 and data[:4] == b"\x7fELF":
             return "ELF"
+        if len(data) >= 4 and data[:4] == b"\x00asm":
+            return "WASM"
+        if len(data) >= 4 and data[:4] == b"dex\n":
+            return "Android DEX"
         if len(data) >= 4:
             magic = struct.unpack_from(">I", data, 0)[0]
             if magic in (0xFEEDFACE, 0xCEFAEDFE, 0xFEEDFACF, 0xCFFAEDFE):

@@ -633,6 +633,9 @@ class BinaryIntelEngine:
         structured = decomp.decompile_structured(insns, func_name="entry_main")
         from reverse_forge.unified_decompiler_pipeline import UnifiedDecompilerPipeline
         from reverse_forge.vuln_scanner_engine import BinaryVulnerabilityScannerEngine
+        from reverse_forge.bytecode_clr_dex_wasm_engine import BytecodeManagedEngine
+        from reverse_forge.config_crypto_extractor import ConfigAndCryptoExtractorEngine
+        from reverse_forge.archive_container_triage_engine import ArchiveContainerTriageEngine
         arch_str = str(self.metadata.get("architecture", "x64"))
         uni_res = UnifiedDecompilerPipeline(arch=arch_str).decompile_function_bytes(code_slice, base_va=base_va)
         vuln_rep = BinaryVulnerabilityScannerEngine().scan_binary(
@@ -696,6 +699,12 @@ class BinaryIntelEngine:
                 .ObfuscatedStringSolver()
                 .deobfuscate_all_strings(self.binary_bytes)
             ),
+            "calling_convention": uni_res.calling_convention,
+            "recovered_prototype": uni_res.recovered_prototype,
+            "stack_frame_size_bytes": uni_res.stack_frame_size_bytes,
+            "container_triage": asdict(ArchiveContainerTriageEngine().triage_container(self.binary_bytes)),
+            "bytecode_analysis": asdict(BytecodeManagedEngine().analyze_binary(self.binary_bytes)),
+            "config_and_crypto": asdict(ConfigAndCryptoExtractorEngine().extract_all(self.binary_bytes)),
             "direct_syscalls": [
                 asdict(s)
                 for s in __import__("reverse_forge.syscall_struct_engine", fromlist=["SyscallAndStructEngine"])
@@ -825,6 +834,152 @@ class BinaryIntelEngine:
                 summary_answer=f"Identified {v_rep.total_findings} CWE vulnerability finding(s) (Overall Risk: {v_rep.overall_risk_rating}).",
                 total_matches=v_rep.total_findings,
                 results=[asdict(f) for f in v_rep.findings],
+            )
+
+        # 4c-ter. Bytecode / WASM / DEX / .NET CLR query
+        if any(w in ql for w in ("bytecode", "wasm", "webassembly", "dex", "dalvik", "dotnet", ".net", "clr", "cil")):
+            from reverse_forge.bytecode_clr_dex_wasm_engine import BytecodeManagedEngine
+            bc_rep = BytecodeManagedEngine().analyze_binary(self.binary_bytes)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="BYTECODE_MANAGED_ANALYSIS",
+                summary_answer=f"Bytecode Runtime: {bc_rep.runtime_format} ({bc_rep.format_version}), {len(bc_rep.instructions)} instruction(s) decoded.",
+                total_matches=max(1, len(bc_rep.instructions)),
+                results=[asdict(bc_rep)],
+            )
+
+        # 4c-quater. CPU Emulation query
+        if any(w in ql for w in ("emulate", "emulator", "unicorn", "qiling", "trace")):
+            from reverse_forge.cpu_emulator_engine import DeterministicCPUEmulator
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(self.binary_bytes, self.metadata)
+            emu_rep = DeterministicCPUEmulator(base_va=entry_va or 0x401000).emulate_bytes(code_slice[:512], max_steps=64)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="CPU_MICRO_EMULATION",
+                summary_answer=f"Emulated {emu_rep.steps_executed} step(s) ({emu_rep.halt_reason}), RAX={emu_rep.return_register_value}.",
+                total_matches=emu_rep.steps_executed or 1,
+                results=[asdict(emu_rep)],
+            )
+
+        # 4c-quinquies. C2 Config / Custom Base64 / RC4 query
+        if any(w in ql for w in ("config", "c2", "base64", "rc4", "mutex", "user-agent")):
+            from reverse_forge.config_crypto_extractor import ConfigAndCryptoExtractorEngine
+            cfg_rep = ConfigAndCryptoExtractorEngine().extract_all(self.binary_bytes)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="CONFIG_AND_CRYPTO_EXTRACTION",
+                summary_answer=f"Extracted {len(cfg_rep.custom_base64_tables)} Base64 table(s), {len(cfg_rep.c2_endpoints)} C2 endpoint(s), {len(cfg_rep.mutex_names)} mutex(es).",
+                total_matches=len(cfg_rep.custom_base64_tables) + len(cfg_rep.c2_endpoints) + len(cfg_rep.mutex_names) or 1,
+                results=[asdict(cfg_rep)],
+            )
+
+        # 4c-sexies. YARA / SIGMA / STIX Threat-Intel Rule Synthesis query
+        if any(w in ql for w in ("yara", "sigma", "stix", "ioc", "detection rule")):
+            from reverse_forge.yara_sigma_ioc_generator import YaraSigmaIOCGenerator
+            code_slice, _ = CorrelationEngine._resolve_disassembly_slice(self.binary_bytes, self.metadata)
+            bundle = YaraSigmaIOCGenerator().generate_all(self.binary_bytes, self.get_full_dossier(), code_slice=code_slice)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="YARA_SIGMA_IOC_GENERATION",
+                summary_answer=f"Synthesized YARA rule '{bundle.rule_identifier}' ({len(bundle.high_specificity_strings)} high-specificity indicators) + SIGMA + STIX 2.1.",
+                total_matches=1,
+                results=[asdict(bundle)],
+            )
+
+        # 4c-septies. Layer-2 Bridge Export (IDA / Ghidra / Binary Ninja / x64dbg) query
+        if any(w in ql for w in ("bridge", "ida", "ghidra", "binja", "binary ninja", "x64dbg", "dd64")):
+            from reverse_forge.tier2_bridge_exporter import Tier2BridgeExporter
+            pkg = Tier2BridgeExporter().export_bridge_package(self.get_full_dossier())
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="LAYER2_BRIDGE_EXPORT",
+                summary_answer=f"Exported {pkg.total_annotations_exported} Layer-1 triage annotation(s) for IDA Pro, Ghidra, Binary Ninja, and x64dbg (.dd64).",
+                total_matches=max(1, pkg.total_annotations_exported),
+                results=[asdict(pkg)],
+            )
+
+        # 4c-octies. Under-Constrained Force-Execution Visor query
+        if any(w in ql for w in ("force-exec", "under-constrained", "visor", "auto-page", "all paths")):
+            from reverse_forge.underconstrained_visor_engine import UnderConstrainedMicroVisor
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(self.binary_bytes, self.metadata)
+            v_rep = UnderConstrainedMicroVisor(base_va=entry_va or 0x401000).force_execute_function(code_slice[:512])
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="UNDERCONSTRAINED_FORCE_EXECUTION",
+                summary_answer=f"Explored {v_rep.total_paths_explored} branch path(s) with {v_rep.auto_paged_faults_recovered} auto-paged fault recovery(s).",
+                total_matches=v_rep.total_paths_explored,
+                results=[asdict(v_rep)],
+            )
+
+        # 4c-novies. Multi-Decompiler AST Fusion query
+        if any(w in ql for w in ("fuse", "consensus", "multi-decompile")):
+            from reverse_forge.multi_decompiler_fusion_engine import MultiDecompilerFusionEngine
+            code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(self.binary_bytes, self.metadata)
+            f_rep = MultiDecompilerFusionEngine().decompile_with_fusion(code_slice, base_va=entry_va or 0x401000)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="MULTI_DECOMPILER_CONSENSUS_FUSION",
+                summary_answer=f"Fused consensus C (backend: {f_rep.winning_backend}, confidence: {f_rep.consensus_confidence}).",
+                total_matches=1,
+                results=[asdict(f_rep)],
+            )
+
+        # 4c-decies. Memory Dump / MDMP / Core Dump Forensics query
+        if any(w in ql for w in ("mdmp", "minidump", "core dump", "memory dump", "unmap")):
+            from reverse_forge.live_memory_dump_engine import LiveMemoryAndDumpEngine
+            m_rep = LiveMemoryAndDumpEngine().analyze_dump(self.binary_bytes)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="MEMORY_DUMP_FORENSICS",
+                summary_answer=f"Dump Format: {m_rep.dump_format} ({len(m_rep.streams_or_segments)} stream(s), unmapped_pe_fixed={m_rep.unmapped_pe_fixed}).",
+                total_matches=1,
+                results=[asdict(m_rep)],
+            )
+
+        # 4c-undecies. Native Rust / C-ABI Zero-Copy Core & Ghidra P-Code Decompiler query
+        if any(w in ql for w in ("rust", "pcode", "p-code", "native-bench", "speedup")):
+            from reverse_forge.native_rust_bridge import NativeRustAccelerator
+            b_rep = NativeRustAccelerator.benchmark_rust_vs_python(min(max(len(self.binary_bytes), 65536), 524288))
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="NATIVE_RUST_PCODE_ACCELERATOR",
+                summary_answer=f"Native Rust/C-ABI Core active ({b_rep.compiler_used}): {b_rep.speedup_multiplier}x speedup ({b_rep.native_rust_time_ms} ms vs {b_rep.pure_python_time_ms} ms, ~{b_rep.estimated_native_rss_kb} KB RSS).",
+                total_matches=1,
+                results=[asdict(b_rep)],
+            )
+
+        # 4c-duodecies. 16-Category Omni Toolkit queries (PCAP/Netzob, ImHex .hexpat, JVM .class, Binwalk)
+        if any(w in ql for w in ("pcap", "netzob", "wireshark", "packet")):
+            from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
+            p_rep = OmniToolkit16CatEngine().dissect_pcap_and_infer_protocol(self.binary_bytes)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="PCAP_NETZOB_PROTOCOL_DISSECTION",
+                summary_answer=f"PCAP Valid={p_rep.is_valid_pcap}, Packets={p_rep.total_packets}, Grammar: {p_rep.inferred_protocol_struct}",
+                total_matches=max(1, p_rep.total_packets),
+                results=[asdict(p_rep)],
+            )
+
+        if any(w in ql for w in ("imhex", "hexpat")):
+            from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
+            fields = OmniToolkit16CatEngine().evaluate_imhex_pattern(self.binary_bytes, "struct Header { u16 magic; u16 cblp; u32 reserved; };", 0)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="IMHEX_STRUCT_EVALUATION",
+                summary_answer=f"Evaluated {len(fields)} ImHex pattern field(s) at offset 0x0.",
+                total_matches=len(fields),
+                results=[asdict(x) for x in fields],
+            )
+
+        if any(w in ql for w in ("binwalk", "squashfs", "uimage")):
+            from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
+            carved = OmniToolkit16CatEngine().carve_firmware_partitions(self.binary_bytes)
+            return SmartQueryAnswer(
+                query=q,
+                intent_classified="BINWALK_PARTITION_CARVING",
+                summary_answer=f"Carved {len(carved)} embedded firmware partition/stream signature(s).",
+                total_matches=len(carved),
+                results=[asdict(x) for x in carved],
             )
 
         # 4d. Direct Syscalls query

@@ -5,7 +5,6 @@ import os
 import re
 import struct
 import sys
-import zipfile
 from typing import Dict, Any, List
 
 from reverse_forge.pe_analyzer import PEAnalyzer
@@ -494,6 +493,90 @@ def main():
     vs_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
     vs_p.add_argument("--output", "-o", help="Optional path to write JSON vulnerability scan report")
 
+    # bytecode-audit (Phase 71: Multi-Runtime .NET CLR / Android DEX / WebAssembly WASM Decompiler)
+    bc_p = subparsers.add_parser("bytecode-audit", help="Disassemble & decompile .NET CLR, Android DEX, or WebAssembly (WASM) binaries")
+    bc_p.add_argument("--input", "-i", required=True, help="Target managed or bytecode binary")
+    bc_p.add_argument("--output", "-o", help="Optional path to write JSON bytecode report")
+
+    # emulate-cpu (Phase 72: Pure-Python Deterministic CPU & API Stub Emulator)
+    em_p = subparsers.add_parser("emulate-cpu", help="Emulate binary entry point or shellcode in pure-Python CPU & API sandbox")
+    em_p.add_argument("--input", "-i", required=True, help="Target binary or raw shellcode")
+    em_p.add_argument("--steps", type=int, default=64, help="Maximum instructions to emulate")
+    em_p.add_argument("--output", "-o", help="Optional path to write JSON CPU emulation trace")
+
+    # abi-recover (Phase 73: ABI Calling Convention, Prototype & Stack-Frame Variable Recovery)
+    ab_p = subparsers.add_parser("abi-recover", help="Recover function ABI calling convention, C prototype & stack-frame variables")
+    ab_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    ab_p.add_argument("--output", "-o", help="Optional path to write JSON ABI & stack-frame report")
+
+    # extract-config (Phase 74: C2 Configuration, Custom Base64 Alphabet & RC4 KSA Extractor)
+    ec_p = subparsers.add_parser("extract-config", help="Extract custom Base64 tables, RC4 KSA loops, mutexes & C2 configs")
+    ec_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    ec_p.add_argument("--output", "-o", help="Optional path to write JSON config & crypto report")
+
+    # container-triage (Phase 76: Multi-Container APK/ZIP/PyInstaller/OLE2/PDF Dropper Triage)
+    ct_p = subparsers.add_parser("container-triage", help="Recursively triage APK, ZIP, PyInstaller, OLE2, or PDF dropper containers")
+    ct_p.add_argument("--input", "-i", required=True, help="Target archive, APK, installer, or document")
+    ct_p.add_argument("--output", "-o", help="Optional path to write JSON container triage report")
+
+    # generate-yara (Phase 77: Automated YARA Rule, SIGMA YAML & STIX 2.1 Threat-Intel Generator)
+    gy_p = subparsers.add_parser("generate-yara", help="Auto-synthesize YARA rule, SIGMA YAML & STIX 2.1 bundle from binary triage")
+    gy_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    gy_p.add_argument("--output", "-o", help="Optional path to write JSON detection bundle")
+
+    # export-bridge (Phase 78: Universal Layer-1 -> Layer-2 Bridge Exporter for IDA/Ghidra/Binja/x64dbg)
+    eb_p = subparsers.add_parser("export-bridge", help="Export Layer-1 triage findings into IDA Pro, Ghidra, Binary Ninja & x64dbg (.dd64)")
+    eb_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    eb_p.add_argument("--output", "-o", help="Optional path to write JSON Layer-2 bridge package")
+
+    # force-exec (Phase 81: Under-Constrained Force-Execution & Auto-Paging CPU Micro-Visor)
+    fe_p = subparsers.add_parser("force-exec", help="Force-execute binary across both conditional branch arms with lazy shadow auto-paging")
+    fe_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    fe_p.add_argument("--paths", type=int, default=4, help="Maximum branch paths to explore")
+    fe_p.add_argument("--output", "-o", help="Optional path to write JSON force-execution report")
+
+    # decompile-fuse (Phase 82: Multi-Decompiler AST Fusion, Pre-Deobfuscation & Visor Verification)
+    dfu_p = subparsers.add_parser("decompile-fuse", help="Run Multi-Decompiler AST Fusion with pre-deobfuscation & visor return verification")
+    dfu_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    dfu_p.add_argument("--output", "-o", help="Optional path to write JSON fused decompilation report")
+
+    # memory-dump (Phase 84: Windows Minidump MDMP, ELF ET_CORE & In-Memory PE Unmapper)
+    md_p = subparsers.add_parser("memory-dump", help="Analyze Windows Minidump (.dmp), ELF Core Dump, or unmap in-memory PE image")
+    md_p.add_argument("--input", "-i", required=True, help="Target minidump, core dump, or memory-dumped PE")
+    md_p.add_argument("--output", "-o", help="Optional path to write JSON memory dump forensics report")
+
+    # rust-bench (Phase 86-90: Zero-Copy Native Rust / C-ABI Core & Ghidra P-Code Benchmark)
+    rb_p = subparsers.add_parser("rust-bench", help="Benchmark compiled zero-copy Rust/C-ABI core vs Python and run Ghidra P-Code SSA")
+    rb_p.add_argument("--size", type=int, default=524288, help="Buffer size in bytes to benchmark")
+    rb_p.add_argument("--output", "-o", help="Optional path to write JSON benchmark report")
+
+    # rust-decompile (Phase 86-90: Native Rust Ghidra P-Code & Heritage SSA Decompiler)
+    rd_p = subparsers.add_parser("rust-decompile", help="Decompile binary using the native Rust Ghidra P-Code & Heritage SSA engine")
+    rd_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    rd_p.add_argument("--output", "-o", help="Optional path to write JSON P-Code decompilation report")
+
+    # pcap-dissect (Phase 91-100: Wireshark/Zeek PCAP Dissector & Netzob Protocol Grammar Inferencer)
+    pc_p = subparsers.add_parser("pcap-dissect", help="Dissect PCAP capture and infer L7 binary protocol struct grammar (Wireshark/Netzob)")
+    pc_p.add_argument("--input", "-i", required=True, help="Target .pcap file")
+    pc_p.add_argument("--output", "-o", help="Optional path to write JSON PCAP protocol report")
+
+    # imhex-eval (Phase 91-100: ImHex .hexpat Binary Struct Pattern DSL Evaluator)
+    ih_p = subparsers.add_parser("imhex-eval", help="Evaluate an ImHex .hexpat struct definition against a binary file")
+    ih_p.add_argument("--input", "-i", required=True, help="Target binary artifact")
+    ih_p.add_argument("--pattern", "-p", default="struct Header { u16 magic; u16 cblp; u32 reserved; };", help="ImHex struct pattern")
+    ih_p.add_argument("--offset", type=int, default=0, help="Starting byte offset")
+    ih_p.add_argument("--output", "-o", help="Optional path to write JSON evaluated fields")
+
+    # jvm-decompile (Phase 91-100: Recaf/CFR/FernFlower Java .class Bytecode Decompiler)
+    jv_p = subparsers.add_parser("jvm-decompile", help="Parse JVM .class (0xCAFEBABE) constant pool and decompile to Java")
+    jv_p.add_argument("--input", "-i", required=True, help="Target .class file")
+    jv_p.add_argument("--output", "-o", help="Optional path to write JSON JVM decompilation report")
+
+    # binwalk-carve (Phase 91-100: Binwalk Embedded Filesystem & Compression Partition Carver)
+    bw_p = subparsers.add_parser("binwalk-carve", help="Scan firmware image for SquashFS, CramFS, UBI, uImage, DTB, and compressed streams")
+    bw_p.add_argument("--input", "-i", required=True, help="Target firmware image")
+    bw_p.add_argument("--output", "-o", help="Optional path to write JSON Binwalk partition report")
+
     args = parser.parse_args()
     installer = ToolchainInstaller()
 
@@ -665,7 +748,6 @@ def main():
 
     elif args.command == "unpack":
         _require_existing_file(args.input)
-        installer.ensure_unpacking_tools()
         from reverse_forge.layer_unpacker import LayerUnpacker
         with open(args.input, "rb") as f:
             data = f.read()
@@ -919,11 +1001,11 @@ def main():
             "IndirectJumpTableResolver", "PDBSymbolEngine", "StructLayoutRecoveryEngine",
             "FLIRTRuntimeEngine", "GDBRSPClient", "VirtualizedCanvasEngine",
             "RecursiveDescentDisassembler", "GoRustReconstructor", "ForgeScriptingWorkspace",
-            "UnifiedDecompilerPipeline", "BinaryVulnerabilityScannerEngine",
+            "UnifiedDecompilerPipeline", "BinaryVulnerabilityScannerEngine", "BytecodeManagedEngine", "DeterministicCPUEmulator", "ABIAndStackFrameEngine", "ConfigAndCryptoExtractorEngine", "ArchiveContainerTriageEngine", "YaraSigmaIOCGenerator", "Tier2BridgeExporter", "UnderConstrainedMicroVisor", "MultiDecompilerFusionEngine", "LiveMemoryAndDumpEngine", "NativeRustAccelerator", "OmniToolkit16CatEngine", "RustPcapNetzobEngine", "RustImHexPatternEngine", "RustGhidraCollapseStructurer", "RustDeobfuscationFlossMbaEngine", "RustSymbolsRttiGolangPdbEngine", "RustTaintVsaVulnEngine", "RustYaraSigmaBridgeEngine", "RustDeepElfMachoEhFrameEngine", "RustGhidraRuleActionTypeLattice", "Rust12StagePipelineSarifSbomEngine", "RustUpxDe4dotCapaRizinEngine",
         ]
         report = {
-            "version": "11.0.0-eternal",
-            "phases_implemented": 70,
+            "version": "26.0.0-rust-bicentennial",
+            "phases_implemented": 120,
             "internal_engines_count": len(internal_engines),
             "internal_engines_status": "ALL_READY",
             "external_toolchains": {
@@ -1495,6 +1577,196 @@ def main():
             "risk_rating": dos.get("vulnerability_risk_rating", "CLEAN"),
             "vulnerabilities": dos.get("vulnerabilities", []),
         }, args.output, "Automated CWE Vulnerability Scan")
+
+    elif args.command == "bytecode-audit":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.bytecode_clr_dex_wasm_engine import BytecodeManagedEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = BytecodeManagedEngine().analyze_binary(data)
+        _write_or_print(asdict(rep), args.output, "Multi-Runtime Bytecode & Managed Assembly Audit")
+
+    elif args.command == "emulate-cpu":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.cpu_emulator_engine import DeterministicCPUEmulator
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        rep = DeterministicCPUEmulator(base_va=entry_va or 0x401000).emulate_bytes(code_slice[:1024], max_steps=args.steps)
+        _write_or_print(asdict(rep), args.output, "Deterministic CPU & API Stub Emulation")
+
+    elif args.command == "abi-recover":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.abi_frame_recovery_engine import ABIAndStackFrameEngine
+        from reverse_forge.recursive_disassembler import RecursiveDescentDisassembler
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        base_va = entry_va or 0x401000
+        dmap = RecursiveDescentDisassembler().disassemble_recursive(code_slice[:1024], base_va=base_va)
+        ins_tuples = [(a, i.mnemonic, i.op_str) for a, i in sorted(dmap.items())]
+        sig = ABIAndStackFrameEngine().recover_function_abi(ins_tuples, func_name="entry_main", os_format=fmt)
+        _write_or_print(asdict(sig), args.output, "ABI Calling Convention & Stack-Frame Recovery")
+
+    elif args.command == "extract-config":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.config_crypto_extractor import ConfigAndCryptoExtractorEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = ConfigAndCryptoExtractorEngine().extract_all(data)
+        _write_or_print(asdict(rep), args.output, "C2 Configuration, Custom Base64 & RC4 Extractor")
+
+    elif args.command == "container-triage":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.archive_container_triage_engine import ArchiveContainerTriageEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = ArchiveContainerTriageEngine().triage_container(data)
+        _write_or_print(asdict(rep), args.output, "Multi-Container & Dropper Recursive Triage")
+
+    elif args.command == "generate-yara":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.binary_intel_engine import BinaryIntelEngine
+        from reverse_forge.yara_sigma_ioc_generator import YaraSigmaIOCGenerator
+        with open(args.input, "rb") as f:
+            data = f.read()
+        intel = BinaryIntelEngine(data, filepath=args.input)
+        code_slice, _ = CorrelationEngine._resolve_disassembly_slice(data, intel.metadata)
+        bundle = YaraSigmaIOCGenerator().generate_all(data, intel.get_full_dossier(), code_slice=code_slice)
+        _write_or_print(asdict(bundle), args.output, "Automated YARA, SIGMA & STIX 2.1 Threat-Intel Bundle")
+
+    elif args.command == "export-bridge":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.binary_intel_engine import BinaryIntelEngine
+        from reverse_forge.tier2_bridge_exporter import Tier2BridgeExporter
+        with open(args.input, "rb") as f:
+            data = f.read()
+        intel = BinaryIntelEngine(data, filepath=args.input)
+        pkg = Tier2BridgeExporter().export_bridge_package(intel.get_full_dossier())
+        _write_or_print(asdict(pkg), args.output, "Layer-1 to Layer-2 Bridge Package (IDA/Ghidra/Binja/x64dbg)")
+
+    elif args.command == "force-exec":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.underconstrained_visor_engine import UnderConstrainedMicroVisor
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        rep = UnderConstrainedMicroVisor(base_va=entry_va or 0x401000).force_execute_function(code_slice[:1024], max_paths=args.paths)
+        _write_or_print(asdict(rep), args.output, "Under-Constrained Force-Execution & Auto-Paging Visor")
+
+    elif args.command == "decompile-fuse":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.multi_decompiler_fusion_engine import MultiDecompilerFusionEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        rep = MultiDecompilerFusionEngine().decompile_with_fusion(code_slice, base_va=entry_va or 0x401000)
+        _write_or_print(asdict(rep), args.output, "Multi-Decompiler AST Fusion & Visor Verification")
+
+    elif args.command == "memory-dump":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.live_memory_dump_engine import LiveMemoryAndDumpEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = LiveMemoryAndDumpEngine().analyze_dump(data)
+        _write_or_print(asdict(rep), args.output, "Memory Dump & In-Memory PE Forensics")
+
+    elif args.command == "rust-bench":
+        from dataclasses import asdict
+        from reverse_forge.native_rust_bridge import NativeRustAccelerator
+        rep = NativeRustAccelerator.benchmark_rust_vs_python(args.size)
+        _write_or_print(asdict(rep), args.output, "Native Rust / C-ABI Zero-Copy Benchmark")
+
+    elif args.command == "rust-decompile":
+        _require_existing_file(args.input)
+        from reverse_forge.native_rust_bridge import NativeRustAccelerator
+        with open(args.input, "rb") as f:
+            data = f.read()
+        ce = CorrelationEngine()
+        fmt = ce.identify_format(data)
+        meta = (
+            PEAnalyzer(data).analyze() if fmt == "PE"
+            else (ELFAnalyzer(data).analyze() if fmt == "ELF"
+                  else (MachOAnalyzer(data).analyze() if fmt == "Mach-O" else {}))
+        )
+        code_slice, entry_va = CorrelationEngine._resolve_disassembly_slice(data, meta)
+        c_out = NativeRustAccelerator.native_ghidra_pcode_decompile(code_slice[:512], base_va=entry_va or 0x401000)
+        v_out = NativeRustAccelerator.native_visor_exec(code_slice[:512], base_va=entry_va or 0x401000)
+        _write_or_print({"pcode_decompiled_c": c_out, "visor_execution": v_out}, args.output, "Native Rust Ghidra P-Code Decompilation")
+
+    elif args.command == "pcap-dissect":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = OmniToolkit16CatEngine().dissect_pcap_and_infer_protocol(data)
+        _write_or_print(asdict(rep), args.output, "PCAP Dissection & Netzob Protocol Grammar")
+
+    elif args.command == "imhex-eval":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        fields = OmniToolkit16CatEngine().evaluate_imhex_pattern(data, args.pattern, args.offset)
+        _write_or_print({"fields_count": len(fields), "fields": [asdict(x) for x in fields]}, args.output, "ImHex Struct Pattern Evaluation")
+
+    elif args.command == "jvm-decompile":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        rep = OmniToolkit16CatEngine().decompile_jvm_class(data)
+        _write_or_print(asdict(rep), args.output, "JVM .class Constant-Pool Decompilation")
+
+    elif args.command == "binwalk-carve":
+        _require_existing_file(args.input)
+        from dataclasses import asdict
+        from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
+        with open(args.input, "rb") as f:
+            data = f.read()
+        hits = OmniToolkit16CatEngine().carve_firmware_partitions(data)
+        _write_or_print({"partitions_count": len(hits), "partitions": [asdict(x) for x in hits]}, args.output, "Binwalk Firmware Partition Carving")
 
 
 if __name__ == "__main__":

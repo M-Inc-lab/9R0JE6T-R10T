@@ -1,0 +1,47 @@
+[package]
+name = "reverse-forge-core"
+version = "26.0.0"
+edition = "2021"
+authors = ["R3V3R53//F0RG3 Architecture Team"]
+description = "Zero-copy, low-memory native Rust reverse-engineering suite (18 modules: Ghidra P-Code/Heritage SSA/CollapseStructure, Rizin jmptbl, MBA/FLOSS/OLLVM, C++ RTTI/Go/Rust/PDB, Taint/VSA/CWE, Binwalk, PCAP/Netzob, Diaphora, Volatility/PE-sieve, ImHex, YARA/SIGMA & Layer-2 Bridge)."
+license = "GPL-3.0-only"
+
+[lib]
+name = "reverse_forge_core"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "reverse-forge-rs"
+path = "src/main.rs"
+
+[features]
+default = []
+# Enable with: cargo build --release --features full-crates
+full-crates = [
+    "dep:iced-x86",
+    "dep:goblin",
+    "dep:object",
+    "dep:gimli",
+    "dep:pdb",
+    "dep:wasmparser",
+    "dep:capstone",
+    "dep:unicorn-engine",
+]
+
+[dependencies]
+iced-x86 = { version = "1.21", optional = true }
+goblin = { version = "0.8", optional = true }
+object = { version = "0.36", optional = true }
+gimli = { version = "0.31", optional = true }
+pdb = { version = "0.8", optional = true }
+wasmparser = { version = "0.215", optional = true }
+capstone = { version = "0.12", optional = true }
+unicorn-engine = { version = "2.0", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

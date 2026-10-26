@@ -1,6 +1,6 @@
 """
 R3V3R53//F0RG3  Interactive REPL — Stateful Cross-Platform TUI Workbench (v7.0)
-==============================================================================
+===============================================================================
 A polished, stateful interactive reverse-engineering shell wrapping all 54
 subcommands of the reverse_forge CLI plus instant target-aware workspace commands:
   - `load <file>` / `use <file>` — Load a binary once into the session context
@@ -103,6 +103,22 @@ COMMAND_GROUPS: Dict[str, List[Tuple[str, str]]] = {
         ("dossier",          "Complete one-stop executive & technical binary dossier"),
         ("ask",              "Ask any question or keyword ('network', 'compiler', '0x401000')"),
         ("vuln-scan", "Automated CWE vulnerability scanner"),
+        ("bytecode-audit", "Decompile .NET CLR, Android DEX & WASM"),
+        ("emulate-cpu", "Deterministic pure-Python CPU & API emulator"),
+        ("abi-recover", "ABI calling convention & stack-frame recovery"),
+        ("extract-config", "C2 config, custom Base64 & RC4 extractor"),
+        ("container-triage", "Recursive APK/ZIP/PyInstaller/PDF/OLE2 triage"),
+        ("generate-yara", "Auto-generate YARA, SIGMA & STIX 2.1 rules"),
+        ("export-bridge", "Export Layer-1 triage to IDA/Ghidra/Binja/x64dbg"),
+        ("force-exec", "Under-constrained multi-path force-execution visor"),
+        ("decompile-fuse", "Multi-decompiler AST consensus & visor fusion"),
+        ("memory-dump", "Windows Minidump MDMP, ELF core & PE unmapper"),
+        ("rust-bench", "Benchmark zero-copy Rust/C-ABI core vs Python"),
+        ("rust-decompile", "Native Rust Ghidra P-Code & Heritage SSA decompiler"),
+        ("pcap-dissect", "Wireshark/Netzob PCAP & protocol grammar dissector"),
+        ("imhex-eval", "ImHex .hexpat binary struct pattern evaluator"),
+        ("jvm-decompile", "Recaf/CFR Java .class constant-pool decompiler"),
+        ("binwalk-carve", "Binwalk SquashFS/uImage/DTB firmware carver"),
         ("decompile-full",   "8-Pass Unified Decompiler (Disasm->Switch->FLIRT->SSA->Struct)"),
         ("capabilities",     "CAPA-style behavioral capabilities & MITRE ATT&CK matrix"),
         ("xrefs",            "Bidirectional CALL, JMP & RIP-relative string cross-references"),
@@ -258,29 +274,29 @@ class Spinner:
 
 
 BANNER = r"""
- ╔═══════════════════════════════════════════════════════════════��[...]
+ ╔══════════════════════════════════════════════════════════════════════╗
  ║   ██████╗ ██████╗ ██╗   ██╗██████╗ ██████╗ ██████╗ ██████╗           ║
  ║   ██╔══██╗╚════██╗██║   ██║╚════██╗██╔══██╗╚════██╗╚════██╗          ║
  ║   ██████╔╝ █████╔╝██║   ██║ █████╔╝██████╔╝ █████╔╝ █████╔╝          ║
  ║   ██╔══██╗ ╚═══██╗╚██╗ ██╔╝██╔══╝ ██╔══██╗╚═══██╗ ╚═══██╗            ║
  ║   ██║  ██║██████╔╝ ╚████╔╝ ███████╗██║  ██║██████╔╝██████╔╝          ║
  ║   ╚═╝  ╚═╝╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝╚═════╝ ╚═════╝           ║
- ║            ╔═╗╔═╗╦═╗╔═╗╔═╗  //  F0RG3  v11.0.0-eternal            ║
+ ║            ╔═╗╔═╗╦═╗╔═╗╔═╗  //  F0RG3  v26.0.0-rust-bicentennial            ║
  ║            ╠╣ ║ ║╠╦╝║ ╦║╣                                            ║
  ║            ╚  ╚═╝╩╚═╚═╝╚═╝  47 Engines · 54 Commands · Stateful TUI  ║
- ╚═══════════════════════════════════════════════════════════════��[...]
- """
+ ╚══════════════════════════════════════════════════════════════════════╝
+"""
 
 
 def _print_banner() -> None:
     for line in BANNER.strip().splitlines():
         if "v7.0.0" in line:
-            line = line.replace("v11.0.0-eternal", _yellow("v11.0.0-eternal"))
+            line = line.replace("v26.0.0-rust-bicentennial", _yellow("v26.0.0-rust-bicentennial"))
         if "╔" in line or "╚" in line or "║" in line:
             line = _magenta(line) if ("██" in line or "═╗" in line or "═╝" in line) else _blue(line)
         print(line)
     print()
-    print(f"  {_dim('Quickstart:')} {_green('load <file>')} {_dim('→')} {_cyan('info')} {_dim('·')} {_cyan('caps')} {_dim('·')} {_cyan('xrefs')} {_dim('·')} {_cyan('ask network')} {_dim('·')}")
+    print(f"  {_dim('Quickstart:')} {_green('load <file>')} {_dim('→')} {_cyan('info')} {_dim('·')} {_cyan('caps')} {_dim('·')} {_cyan('xrefs')} {_dim('·')} {_cyan('ask network')} {_dim('·')} {_cyan('inspect 0x0')}")
     print(f"  {_dim('Type')} {_cyan('groups')} {_dim('for all 54 categorized commands ·')} {_cyan('exit')} {_dim('to quit')}")
     print()
 
@@ -394,7 +410,6 @@ class Session:
         if not os.path.exists(expanded) or not os.path.isfile(expanded):
             print(f"  {_red('Error:')} File not found: {expanded}")
             return False
-
         try:
             from reverse_forge.binary_intel_engine import BinaryIntelEngine
             with open(expanded, "rb") as f:
@@ -559,7 +574,7 @@ def repl_main(initial_binary: Optional[str] = None) -> None:
             continue
 
         elif cmd == "version":
-            print(f"\n  {_bold('R3V3R53//F0RG3')} {_yellow('v11.0.0-eternal')}")
+            print(f"\n  {_bold('R3V3R53//F0RG3')} {_yellow('v26.0.0-rust-bicentennial')}")
             print(f"  {_dim('47 internal engines · 54 subcommands · pure Python core')}\n")
             continue
 
