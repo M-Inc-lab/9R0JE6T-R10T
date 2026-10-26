@@ -19,13 +19,21 @@ class CorrelationEngine:
         self.ghidra = GhidraHeadlessAnalyzer()
 
     def identify_format(self, data: bytes) -> str:
-        if len(data) >= 2 and data[:2] == b"MZ":
+        if len(data) >= 2 and data[:2] in (b"MZ", b"ZM"):
+            if len(data) >= 0x40:
+                pe_off = struct.unpack_from("<I", data, 0x3C)[0]
+                if 0 < pe_off + 2 <= len(data):
+                    sig2 = data[pe_off : pe_off + 2]
+                    if sig2 == b"NE":
+                        return "NE (16-bit)"
+                    if sig2 in (b"LE", b"LX"):
+                        return "LE/LX (VxD/OS2)"
             return "PE"
         if len(data) >= 4 and data[:4] == b"\x7fELF":
             return "ELF"
         if len(data) >= 4 and data[:4] == b"\x00asm":
             return "WASM"
-        if len(data) >= 4 and data[:4] == b"dex\n":
+        if len(data) >= 4 and data[:4] in (b"dex\n", b"dey\n"):
             return "Android DEX"
         if len(data) >= 4:
             magic = struct.unpack_from(">I", data, 0)[0]
@@ -36,8 +44,40 @@ class CorrelationEngine:
                     return "Mach-O"
                 if magic == 0xCAFEBABE and len(data) >= 8:
                     _, major_ver = struct.unpack_from(">HH", data, 4)
-                    if 45 <= major_ver <= 75:
+                    if 44 <= major_ver <= 75:
                         return "JVM Class"
+            if magic == 0x27051956:
+                return "U-Boot uImage"
+            if magic == 0xD00DFEED:
+                return "Flattened Device Tree (DTB/FIT)"
+        # Additional IDA Pro format signatures
+        prefix_map = [
+            (b"UF2\n", "UF2 Firmware"),
+            (b"ANDROID!", "Android Boot Image"),
+            (b"MDMP", "Windows Minidump (MDMP)"),
+            (b"Microsoft C/C++ MSF 7.00", "Microsoft PDB"),
+            (b"!<arch>\n", "AR Static Archive (.a/.lib)"),
+            (b"NSO0", "Nintendo Switch NSO0"),
+            (b"NRO0", "Nintendo Switch NRO0"),
+            (b"XBEH", "Xbox XBE"),
+            (b"XEX2", "Xbox 360 XEX2"),
+            (b"PS-X EXE", "PlayStation PSX-EXE"),
+            (b"\x4f\x15\x3d\x1d", "PlayStation SELF"),
+            (b"NES\x1a", "NES iNES ROM"),
+            (b"\x1bLua", "Lua Bytecode (.luac)"),
+            (b"BC\xc0\xde", "LLVM Bitcode (.bc)"),
+            (b"VZ", "UEFI Terse Executable (TE)"),
+            (b"dyld_v1", "Apple DYLD Shared Cache"),
+            (b"IDA1", "IDA Database (.idb)"),
+            (b"IDA2", "IDA 64-bit Database (.i64)"),
+        ]
+        for sig, name in prefix_map:
+            if data.startswith(sig):
+                return name
+        if len(data) >= 11 and data[0:1] == b":" and all(chr(b) in "0123456789abcdefABCDEF:" for b in data[:11]):
+            return "Intel HEX Firmware"
+        if len(data) >= 10 and data[0:1] == b"S" and chr(data[1]) in "0123" and all(chr(b) in "0123456789abcdefABCDEF" for b in data[2:10]):
+            return "Motorola S-Record Firmware"
         return "Unknown"
 
     def analyze_artifact(self, filepath: str, run_ghidra: bool = True) -> Dict[str, Any]:
