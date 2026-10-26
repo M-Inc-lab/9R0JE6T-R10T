@@ -77,6 +77,9 @@ def _write_or_print(res: Dict[str, Any], output_path: str | None, label: str) ->
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(res, f, indent=2)
         print(f"Success: {label} written to {output_path}")
+    elif (hasattr(sys.stdout, "isatty") and sys.stdout.isatty()) or os.environ.get("RF_PRETTY_TUI") == "1":
+        from reverse_forge.tui_renderer import render_pretty_cli_output
+        print(render_pretty_cli_output(res, label))
     else:
         print(json.dumps(res, indent=2))
 

@@ -212,20 +212,21 @@ for _cmds in COMMAND_GROUPS.values():
         ALL_COMMANDS[name] = desc
 
 # Commands that accept `-i / --input` and benefit from automatic session target injection
-TARGET_INPUT_COMMANDS = {
-    "triage", "streaming-triage", "strings", "win-checksec", "win-iat", "win-audit",
-    "elf-audit", "macho-audit", "crypto-audit", "correlate", "dataflow", "decompile",
-    "alias-trace", "sig-scan", "unpack", "structure-cfg", "cpp-rtti", "firmware-base",
-    "eh-frame", "zeroday-scan", "semantic-recover", "pipeline", "ab-bench", "dashboard",
-    "sbom", "ghidra-audit", "ida-audit", "dossier", "capabilities", "xrefs", "inspect",
-    "ask", "gui", "desktop-app",
+TARGET_INPUT_COMMANDS = set(ALL_COMMANDS.keys()) - {
+    "detect-tools", "bootstrap", "doctor", "rust-bench", "db-query", "batch-scan", "corpus-cluster", "bindiff"
 }
 
 META_COMMANDS: Dict[str, str] = {
-    "load":     "Load a binary into active session context (e.g. 'load sample.exe')",
+    "load":     "Load a binary into active session context (e.g. 'load /bin/ls')",
     "use":      "Alias for 'load <binary>'",
-    "info":     "Show executive summary card of currently loaded binary",
-    "caps":     "Show behavioral capabilities of loaded binary",
+    "funcs":    "List all discovered functions in binary (e.g. 'funcs' or 'funcs obstack')",
+    "dec":      "Decompile function by name or VA to C (e.g. 'dec main' or 'dec 0x7710')",
+    "disasm":   "Disassemble function with resolved symbols & strings (e.g. 'disasm main')",
+    "cfg":      "Render ASCII Control-Flow Graph for function (e.g. 'cfg main')",
+    "ir":       "Show Ghidra P-Code SSA, Rizin ESIL & angr VEX IR (e.g. 'ir main')",
+    "hex":      "Hex + ASCII dump & 14-format Data Inspector at VA/offset (e.g. 'hex 0x4730')",
+    "info":     "Show formatted executive dossier, mitigations, functions & decompiled main()",
+    "caps":     "Show behavioral capabilities table of loaded binary",
     "find":     "Search strings or wildcard hex bytes in loaded binary",
     "help":     "Show this command reference",
     "commands": "List all commands (compact)",
@@ -419,22 +420,44 @@ class Session:
             if not isinstance(getattr(intel, "metadata", None), dict):
                 raise ValueError("BinaryIntelEngine did not produce valid metadata")
 
+            from reverse_forge.whole_binary_function_indexer import WholeBinaryFunctionIndexer
             self.target_path = expanded
             self.target_intel = intel
+            self.target_indexer = WholeBinaryFunctionIndexer(data, self.target_intel.metadata)
+            self.discovered_funcs = self.target_indexer.discover_all_functions()
             caps = self.target_intel.detect_capabilities()
             ok_sym = "[+]" if sys.platform == "win32" else "✔"
+            primary_fn = self.discovered_funcs[0].name if self.discovered_funcs else "entry_main"
+            primary_va = self.discovered_funcs[0].addr if self.discovered_funcs else str(self.target_intel.metadata.get("entry_point", "0x0"))
             print(f"\n  {_green(f'{ok_sym} Loaded active target:')} {_bold(os.path.basename(expanded))}")
             print(f"    {_dim('Path:')}         {expanded}")
             print(f"    {_dim('Format/Arch:')}  {_cyan(self.target_intel.format_name)} ({self.target_intel.metadata.get('architecture', 'unknown')})")
             print(f"    {_dim('Size:')}         {len(data):,} bytes  ·  Entropy: {self.target_intel.metadata.get('entropy', 0.0)}")
-            print(f"    {_dim('Entry Point:')}  {_yellow(str(self.target_intel.metadata.get('entry_point', '0x0')))}")
-            print(f"    {_dim('Capabilities:')} {len(caps)} behavioral capability match(es) detected\n")
+            print(f"    {_dim('Entry Point:')}  {_yellow(str(self.target_intel.metadata.get('entry_point', '0x0')))}  ·  {_dim('Primary Function:')} {_green(_bold(f'{primary_fn} @ {primary_va}'))}")
+            print(f"    {_dim('Functions:')}    {_cyan(str(len(self.discovered_funcs)))} indexed  ·  {_dim('Capabilities:')} {len(caps)} match(es)")
+            print(f"    {_dim('Try now:')}      {_green('funcs')} · {_green('dec main')} · {_green('disasm main')} · {_green('cfg main')} · {_green('ir main')} · {_green('info')}\n")
             return True
         except Exception as exc:
             self.target_path = None
             self.target_intel = None
+            self.target_indexer = None
+            self.discovered_funcs = []
             print(f"  {_red('Error:')} Could not load binary: {exc}")
             return False
+
+    def resolve_func_va(self, arg: Optional[str]) -> Optional[int]:
+        if not hasattr(self, "target_indexer") or not self.target_indexer:
+            return None
+        if not arg:
+            return self.target_indexer.main_va or self.target_indexer.entry_va
+        q = arg.strip().lower()
+        for f in getattr(self, "discovered_funcs", []):
+            if f.name.lower() == q or f.addr.lower() == q or f.name.lower().replace("@plt", "") == q:
+                return f.va
+        try:
+            return int(q, 16) if q.startswith("0x") else int(q, 16)
+        except Exception:
+            return self.target_indexer.main_va or self.target_indexer.entry_va
 
     def elapsed(self) -> str:
         s = int(time.time() - self.start_time)
@@ -510,23 +533,97 @@ def repl_main(initial_binary: Optional[str] = None) -> None:
                 session.load_binary(rest[0])
             continue
 
+        elif cmd in ("funcs", "functions", "afl"):
+            if not session.target_intel:
+                print(f"  {_yellow('No binary loaded.')} Run {_green('load <file>')} first.")
+            else:
+                from reverse_forge.tui_renderer import render_functions_table
+                flist = [asdict(f) for f in getattr(session, "discovered_funcs", [])]
+                if rest:
+                    flt = rest[0].lower()
+                    flist = [f for f in flist if flt in f["name"].lower() or flt in f["addr"].lower()]
+                print(render_functions_table(flist, limit=60))
+            continue
+
+        elif cmd in ("dec", "pdf"):
+            if not session.target_intel:
+                print(f"  {_yellow('No binary loaded.')} Run {_green('load <file>')} first.")
+            else:
+                from reverse_forge.tui_renderer import highlight_c_code
+                va = session.resolve_func_va(rest[0] if rest else None)
+                bundle = session.target_indexer.analyze_function(va)
+                print(f"\n  {_bold(_cyan(f'⚙  DECOMPILED C: {bundle.name} @ {bundle.addr}'))}")
+                print("  " + _dim("─" * 76))
+                print(highlight_c_code(bundle.decompiled_c))
+                print("  " + _dim("─" * 76) + "\n")
+            continue
+
+        elif cmd in ("disasm", "u"):
+            if not session.target_intel:
+                print(f"  {_yellow('No binary loaded.')} Run {_green('load <file>')} first.")
+            else:
+                va = session.resolve_func_va(rest[0] if rest else None)
+                bundle = session.target_indexer.analyze_function(va)
+                print(f"\n  {_bold(_cyan(f'≡  DISASSEMBLY: {bundle.name} @ {bundle.addr} ({len(bundle.disassembly_lines)} instructions)'))}")
+                print("  " + _dim("─" * 78))
+                for ins in bundle.disassembly_lines[:80]:
+                    cmt = f"  {_dim('; ' + ins['comment'])}" if ins.get("comment") else ""
+                    print(f"  {_yellow(ins['va'].ljust(10))} {_dim(ins['bytes'][:14].ljust(15))} {_magenta(_bold(ins['mnem'].ljust(8)))} {ins['ops']}{cmt}")
+                print("  " + _dim("─" * 78) + "\n")
+            continue
+
+        elif cmd in ("cfg", "agf"):
+            if not session.target_intel:
+                print(f"  {_yellow('No binary loaded.')} Run {_green('load <file>')} first.")
+            else:
+                from reverse_forge.tui_renderer import render_ascii_cfg
+                va = session.resolve_func_va(rest[0] if rest else None)
+                bundle = session.target_indexer.analyze_function(va)
+                print(f"\n  {_bold(_cyan(f'⬡  CONTROL-FLOW GRAPH: {bundle.name} @ {bundle.addr} ({len(bundle.cfg_blocks)} blocks)'))}\n")
+                print(render_ascii_cfg(bundle.cfg_blocks, max_blocks=16))
+                print()
+            continue
+
+        elif cmd in ("ir", "pcode", "esil", "vex"):
+            if not session.target_intel:
+                print(f"  {_yellow('No binary loaded.')} Run {_green('load <file>')} first.")
+            else:
+                va = session.resolve_func_va(rest[0] if rest else None)
+                bundle = session.target_indexer.analyze_function(va)
+                print(f"\n  {_bold(_cyan(f'🔬  MULTI-IR LIFTING: {bundle.name} @ {bundle.addr}'))}")
+                if cmd in ("ir", "pcode"):
+                    print(f"\n  {_bold(_yellow('[1] Ghidra P-Code SSA:'))}")
+                    print("\n".join("    " + l for l in bundle.pcode_ssa_text.splitlines()[:25]))
+                if cmd in ("ir", "esil"):
+                    print(f"\n  {_bold(_yellow('[2] Rizin ESIL RPN:'))}")
+                    print("\n".join("    " + l for l in bundle.rizin_esil_text.splitlines()[:25]))
+                if cmd in ("ir", "vex"):
+                    print(f"\n  {_bold(_yellow('[3] angr VEX IRSB:'))}")
+                    print("\n".join("    " + l for l in bundle.angr_vex_text.splitlines()[:25]))
+                print()
+            continue
+
+        elif cmd in ("hex", "px"):
+            if not session.target_intel:
+                print(f"  {_yellow('No binary loaded.')} Run {_green('load <file>')} first.")
+            else:
+                va = session.resolve_func_va(rest[0] if rest else None)
+                bundle = session.target_indexer.analyze_function(va)
+                print(f"\n  {_bold(_cyan(f'#  HEX & ASCII VIEW @ {bundle.addr} (file offset {hex(bundle.file_offset)})'))}")
+                print("  " + _dim("─" * 76))
+                for hr in bundle.hex_rows[:24]:
+                    b_str = " ".join(hr["bytes"]).ljust(48)
+                    print(f"  {_magenta(hr['offset'])}  {b_str}  |{_cyan(hr['ascii'])}|")
+                print("  " + _dim("─" * 76) + "\n")
+            continue
+
         elif cmd == "info":
             if not session.target_intel:
                 print(f"  {_yellow('No binary loaded.')} Run {_green('load <file>')} first.")
             else:
+                from reverse_forge.tui_renderer import render_pretty_cli_output
                 d = session.target_intel.get_full_dossier()
-                print(json.dumps({
-                    "artifact": d["artifact"],
-                    "format": d["format"],
-                    "architecture": d["architecture"],
-                    "size_bytes": d["size_bytes"],
-                    "sha256": d["sha256"],
-                    "entry_point": d["entry_point"],
-                    "mitigations": d["mitigations"],
-                    "sections_count": len(d["sections"]),
-                    "imported_symbols_count": d["imported_symbols_count"],
-                    "capabilities_count": d["capabilities_count"],
-                }, indent=2))
+                print(render_pretty_cli_output(d, "Executive & Technical Binary Dossier"))
             continue
 
         elif cmd == "caps":

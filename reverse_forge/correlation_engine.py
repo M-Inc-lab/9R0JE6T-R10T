@@ -134,7 +134,7 @@ class CorrelationEngine:
             try:
                 off = int(entry_file_off_raw, 16) if isinstance(entry_file_off_raw, str) else int(entry_file_off_raw)
                 if 0 <= off < len(data):
-                    return data[off:off + 64], entry_va
+                    return data[off:off + 512], entry_va
             except Exception:
                 pass
 
@@ -151,13 +151,13 @@ class CorrelationEngine:
                 if entry_va > 0 and sec_sz > 0 and sec_va <= entry_va < sec_va + sec_sz:
                     mapped = sec_off + (entry_va - sec_va)
                     if 0 <= mapped < len(data):
-                        return data[mapped:mapped + 64], entry_va
+                        return data[mapped:mapped + 512], entry_va
                 if 0 <= sec_off < len(data):
-                    return data[sec_off:sec_off + 64], (sec_va or entry_va)
+                    return data[sec_off:sec_off + 512], (sec_va or entry_va)
             except Exception:
                 continue
 
-        return data[:64], entry_va
+        return data[:512], entry_va
 
     def _run_capstone_disassembly(self, data: bytes, format_info: Dict[str, Any]) -> Dict[str, Any]:
         """Disassemble entry point bytes via Capstone if available."""
