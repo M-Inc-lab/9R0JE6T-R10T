@@ -172,21 +172,23 @@ class ObfuscatedStringSolver:
         """
         results: List[DecodedHiddenString] = []
         seen: set[str] = set()
-        scan_slice = binary_bytes[:256 * 1024]
-
+        scan_slice = binary_bytes[:16 * 1024]
+        ascii_pat = re.compile(rb"[\x20-\x7e]{" + str(min_len).encode() + rb",}")
+        # Only test keys that can map the non-zero bytes of scan_slice to plausible strings, or fast pre-filter
         for key in range(1, 256):
-            # Fast XOR transform over candidate slice
-            xored = bytes(b ^ key for b in scan_slice)
-            for m in re.finditer(rb"[\x20-\x7e]{" + str(min_len).encode() + rb",}", xored):
+            xored = scan_slice.translate(bytes(b ^ key for b in range(256)))
+            low_xored = xored.lower()
+            has_any_sig = any(pat.lower().encode() in low_xored for pat in self.HIGH_SIGNAL_PATTERNS)
+            for m in ascii_pat.finditer(xored):
+                is_null_terminated = (m.end() < len(scan_slice) and scan_slice[m.end()] == key)
+                if not is_null_terminated and not has_any_sig:
+                    continue
                 cand_off = m.start()
                 orig_chunk = scan_slice[cand_off : m.end()]
-                # Skip if original bytes were already plain ASCII or uniform padding
                 if all(0x20 <= b <= 0x7E for b in orig_chunk) or len(set(orig_chunk)) <= 2:
                     continue
-                # Check if XORed string is terminated by XORed null byte (i.e. raw byte == key) or high-signal
-                is_null_terminated = (m.end() < len(scan_slice) and scan_slice[m.end()] == key)
                 decoded = m.group(0).decode("ascii", errors="ignore")
-                has_signal = any(pat.lower() in decoded.lower() for pat in self.HIGH_SIGNAL_PATTERNS)
+                has_signal = has_any_sig and any(pat.lower() in decoded.lower() for pat in self.HIGH_SIGNAL_PATTERNS)
 
                 if has_signal or (is_null_terminated and self._is_plausible_identifier_or_text(decoded)):
                     if decoded not in seen:
@@ -208,10 +210,10 @@ class ObfuscatedStringSolver:
         """
         results: List[DecodedHiddenString] = []
         seen: set[str] = set()
-        scan_slice = binary_bytes[:128 * 1024]
+        scan_slice = binary_bytes[:32 * 1024]
 
         for shift in (1, 2, 3, 4, 5, 7, 13, 255, 254, 253):
-            shifted = bytes((b - shift) & 0xFF for b in scan_slice)
+            shifted = scan_slice.translate(bytes((b - shift) & 0xFF for b in range(256)))
             for m in re.finditer(rb"[\x20-\x7e]{" + str(min_len).encode() + rb",}", shifted):
                 decoded = m.group(0).decode("ascii", errors="ignore")
                 if any(pat.lower() in decoded.lower() for pat in self.HIGH_SIGNAL_PATTERNS):

@@ -1,15 +1,22 @@
 """
-R3V3R53//F0RG3  Interactive GUI Application Server (v10.0.0-zenith)
-===================================================================
-Phase 42, 44, 56 & 63 Upgrade: Hardened, Zero-Dependency Web & Desktop Workbench.
-Security & UX Features:
-- Strict localhost Origin/CSRF protection (blocks cross-origin local file reads)
-- Complete DOM XSS sanitization (`escHtml`) on all binary strings, symbols, and sections
-- Drag-and-Drop & One-Click HTML5 File Picker (`POST /api/upload`) + server path loader
-- Real binary CFG basic-block rendering (`/api/cfg` + `UnifiedDecompilerPipeline`)
-- Real binary Hex & ASCII rendering (`/api/hex`) + ImHex 14-Format Data Inspector Drawer
-- Interactive Debugger Toolbar (`Step F7`, `Continue F9`, `Breakpoint F2`)
-- Live Analyst Symbol Rename (`N`), Comment (`;`), `.h` C Header Export & 12-Stage Pipeline Runner
+R3V3R53//F0RG3 — Synchronized 4-Pane Multi-Dock Reverse-Engineering Workbench (`gui_server.py`)
+===============================================================================================
+v27.0.0 Studio & Functional Overhaul:
+  - True 4-Pane Synchronized Split IDE (like Binary Ninja / Cutter / Ghidra):
+    1. Left Dock: Whole-Binary Function Browser (discovers `_start` -> `main`, all internal `sub_xxxx`
+       CALL targets, and all `.rela.plt`/`.dynsym`/IAT imports), Strings, and Sections.
+    2. Center-Left Pane: Interactive Pan/Zoom Sugiyama Control-Flow Graph (`Graph CFG`) +
+       Linear Disassembly table with inline string literal & symbol comments.
+    3. Center-Right Pane (Side-by-Side Synchronized): Live Decompiler & Multi-IR Inspector
+       (`Decompiled C` | `Ghidra P-Code SSA` | `Rizin ESIL` | `angr VEX IRSB`) with bidirectional
+       address highlighting (`// @ 0x...` <-> CFG/Disassembly <-> Hex Inspector).
+    4. Bottom Dock: Synchronized Hex Editor + 14-Format ImHex Data Inspector + Mitigations HUD +
+       Interactive Analysis & Native Rust Engine Console (`55` Rust modules / `54` CLI commands).
+  - Zero `window.prompt()` / `window.alert()` popups: All actions (`Rename Symbol [N]`,
+    `Add Comment [;]`, `Jump to Address [G]`, `Live Patch`, `Open Server Path`) use an in-app
+    non-blocking Command Modal.
+  - Per-Function On-Demand Decompilation (`/api/function?path=...&addr=0x...`): Clicking any
+    function in the sidebar disassembles, graphs, and decompiles that exact function in <15ms.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ import json
 import os
 import socketserver
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -35,6 +43,7 @@ from reverse_forge.macho_analyzer import MachOAnalyzer
 from reverse_forge.decompiler_engine import MicroDecompilerEngine
 from reverse_forge.binary_intel_engine import BinaryIntelEngine
 from reverse_forge.unified_decompiler_pipeline import UnifiedDecompilerPipeline
+from reverse_forge.whole_binary_function_indexer import WholeBinaryFunctionIndexer
 from reverse_forge.project_workspace_db import ProjectWorkspaceDB
 from reverse_forge.pipeline import PipelineStateMachine, AutonomyLevel
 
@@ -44,24 +53,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>9R0JE6T R10T // R3V3R53-F0RG3 Studio v10.0-zenith</title>
+<title>9R0JE6T R10T // R3V3R53-F0RG3 Studio v27.0</title>
 <style>
 :root {
-  --bg-dark: #0a0e17;
-  --bg-panel: #111827;
-  --bg-card: #1f2937;
-  --bg-hover: #374151;
-  --border: #374151;
+  --bg-dark: #090d16;
+  --bg-panel: #0f172a;
+  --bg-card: #1e293b;
+  --bg-hover: #334155;
+  --border: #1e293b;
+  --border-strong: #334155;
   --primary: #38bdf8;
-  --primary-glow: rgba(56, 189, 248, 0.25);
+  --primary-glow: rgba(56, 189, 248, 0.2);
   --accent: #a855f7;
   --success: #22c55e;
   --danger: #ef4444;
   --warning: #f59e0b;
-  --text-main: #f3f4f6;
-  --text-muted: #9ca3af;
-  --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --text-main: #f1f5f9;
+  --text-muted: #94a3b8;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -73,291 +83,561 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  font-size: 13px;
 }
 
+/* Header & Action Bar */
 header {
-  height: 54px;
+  height: 48px;
   background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-strong);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px;
+  padding: 0 12px;
   flex-shrink: 0;
-  gap: 10px;
+  gap: 8px;
 }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-logo {
   font-family: var(--font-mono);
   font-weight: 800;
-  font-size: 14px;
+  font-size: 13px;
+  letter-spacing: 0.4px;
   background: linear-gradient(135deg, var(--primary), var(--accent));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  letter-spacing: 1px;
 }
 .badge {
+  background: rgba(56, 189, 248, 0.14);
+  color: var(--primary);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
-  padding: 3px 8px;
-  border-radius: 4px;
-  background: rgba(56, 189, 248, 0.15);
-  color: var(--primary);
-  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+.badge-accent {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.35);
 }
 
-.nav-tabs { display: flex; gap: 3px; flex-wrap: nowrap; }
+.nav-tabs { display: flex; gap: 4px; align-items: center; }
 .nav-tab {
-  padding: 6px 10px;
   background: transparent;
-  border: none;
   color: var(--text-muted);
+  border: 1px solid transparent;
+  padding: 5px 10px;
+  border-radius: 5px;
+  cursor: pointer;
   font-size: 12px;
   font-weight: 600;
-  border-radius: 6px;
-  cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 5px;
-  transition: all 0.15s ease;
+  gap: 6px;
+  transition: all 0.12s;
 }
 .nav-tab:hover { background: var(--bg-card); color: var(--text-main); }
 .nav-tab.active {
-  background: var(--bg-card);
+  background: rgba(56, 189, 248, 0.14);
   color: var(--primary);
-  border-bottom: 2px solid var(--primary);
+  border-color: rgba(56, 189, 248, 0.4);
 }
-.nav-tab kbd {
-  font-size: 10px;
-  font-family: var(--font-mono);
-  padding: 1px 4px;
-  background: rgba(255,255,255,0.08);
+kbd {
+  background: #090d16;
+  border: 1px solid var(--border-strong);
   border-radius: 3px;
+  padding: 1px 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
   color: var(--text-muted);
 }
-
-.sub-toolbar {
-  height: 38px;
-  background: #0d1320;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 14px;
-  font-size: 12px;
-  flex-shrink: 0;
-}
-.toolbar-group { display: flex; align-items: center; gap: 6px; }
 
 .header-actions { display: flex; align-items: center; gap: 6px; }
 .query-bar {
   background: var(--bg-dark);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
   color: var(--text-main);
-  font-family: var(--font-mono);
-  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 5px;
   width: 220px;
+  font-size: 12px;
+  font-family: var(--font-mono);
 }
-.query-bar:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 2px var(--primary-glow); }
+.query-bar:focus { outline: none; border-color: var(--primary); }
 
 .btn {
   background: var(--bg-card);
   color: var(--text-main);
-  border: 1px solid var(--border);
-  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  padding: 5px 9px;
+  border-radius: 5px;
+  cursor: pointer;
   font-size: 11px;
   font-weight: 600;
-  border-radius: 6px;
-  cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  transition: all 0.12s;
+  white-space: nowrap;
 }
 .btn:hover { background: var(--bg-hover); border-color: var(--primary); }
-.btn-primary { background: var(--primary); color: #04101e; border: none; }
-.btn-primary:hover { background: #7dd3fc; }
+.btn-primary {
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  border-color: #38bdf8;
+  color: #fff;
+}
+.btn-primary:hover { filter: brightness(1.12); }
+.btn-rust {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fbbf24;
+}
 
-.workspace { display: flex; flex: 1; overflow: hidden; }
+/* Sub-Toolbar */
+.sub-toolbar {
+  height: 36px;
+  background: #0b1120;
+  border-bottom: 1px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  gap: 8px;
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+.toolbar-group { display: flex; align-items: center; gap: 5px; }
 
+/* 4-Pane Synchronized Split Workspace */
+.workspace-root {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* Pane 1: Left Function & Symbol Dock */
 .sidebar {
-  width: 300px;
+  width: 280px;
   background: var(--bg-panel);
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--border-strong);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
 }
-.sidebar-header {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
+.sidebar-tabs {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  border-bottom: 1px solid var(--border-strong);
+  background: #0b1120;
 }
-.search-input {
-  width: 100%;
-  background: var(--bg-dark);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  color: var(--text-main);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  outline: none;
-}
-.sidebar-tabs { display: flex; border-bottom: 1px solid var(--border); }
 .sidebar-tab {
   flex: 1;
-  padding: 8px 4px;
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
+  padding: 7px 4px;
+  text-align: center;
   font-size: 11px;
   font-weight: 600;
-  text-transform: uppercase;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
   cursor: pointer;
 }
-.sidebar-tab.active { color: var(--primary); border-bottom: 2px solid var(--primary); background: rgba(56, 189, 248, 0.05); }
-
-.sidebar-list { flex: 1; overflow-y: auto; font-family: var(--font-mono); font-size: 12px; }
+.sidebar-tab.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+  background: rgba(56, 189, 248, 0.06);
+}
+.sidebar-search {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-strong);
+}
+.sidebar-search input {
+  width: 100%;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-strong);
+  color: var(--text-main);
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+}
 .list-item {
-  padding: 8px 12px;
+  padding: 6px 10px;
   border-bottom: 1px solid rgba(255,255,255,0.03);
-  cursor: pointer;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
 }
-.list-item:hover { background: var(--bg-hover); }
-.item-addr { color: var(--accent); font-size: 11px; }
-.item-name { color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+.list-item:hover { background: var(--bg-card); }
+.list-item.active {
+  background: rgba(56, 189, 248, 0.16);
+  border-left: 3px solid var(--primary);
+}
+.item-name {
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.item-meta { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.item-addr { color: var(--primary); font-size: 10.5px; }
+.kind-pill {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.kind-main { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34,197,94,0.4); }
+.kind-entry { background: rgba(56, 189, 248, 0.2); color: #38bdf8; }
+.kind-plt_import { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
+.kind-sub { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; }
 
-.main-stage { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg-dark); position: relative; }
-.view-panel { display: none; flex: 1; height: 100%; width: 100%; overflow: hidden; }
-.view-panel.active { display: flex; flex-direction: column; }
+/* Center + Bottom Dock Container */
+.center-dock-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 
-.cfg-container {
+/* Top Split Row: Center-Left (CFG / Linear Disasm) + Center-Right (Decompiled C / Multi-IR) */
+.top-split-row {
+  flex: 1.55;
+  display: flex;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-strong);
+  min-height: 240px;
+}
+
+.pane-box {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border-strong);
+  position: relative;
+}
+.pane-box:last-child { border-right: none; }
+
+.pane-header {
+  height: 32px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+.pane-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pane-subtabs { display: flex; gap: 3px; }
+.pane-subtab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.pane-subtab.active {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--primary);
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+/* CFG Interactive Pan/Zoom Canvas */
+#cfg-canvas {
   flex: 1;
   position: relative;
-  overflow: auto;
-  background: radial-gradient(circle at center, #111827 0%, #0a0e17 100%);
+  overflow: hidden;
+  background-color: var(--bg-dark);
+  background-image: radial-gradient(#1e293b 1px, transparent 1px);
+  background-size: 20px 20px;
+  cursor: grab;
 }
-.cfg-canvas { position: absolute; top: 0; left: 0; width: 2000px; height: 1600px; pointer-events: none; }
+#cfg-canvas:active { cursor: grabbing; }
+#cfg-viewport {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4000px;
+  height: 4000px;
+  transform-origin: 0 0;
+}
+#cfg-links-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4000px;
+  height: 4000px;
+  pointer-events: none;
+}
+#cfg-nodes-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4000px;
+  height: 4000px;
+}
 .cfg-node {
   position: absolute;
-  background: var(--bg-panel);
-  border: 1px solid #4b5563;
-  border-radius: 8px;
-  box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid #475569;
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.55);
   font-family: var(--font-mono);
-  font-size: 12px;
-  min-width: 270px;
+  font-size: 11.5px;
+  width: 330px;
+  transition: border-color 0.12s;
+}
+.cfg-node:hover, .cfg-node.selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary), 0 8px 24px rgba(56,189,248,0.2);
 }
 .cfg-node-hdr {
-  background: #1f2937;
-  padding: 6px 10px;
+  background: #1e293b;
+  padding: 5px 9px;
   font-weight: 700;
   color: var(--primary);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid #334155;
+  display: flex;
+  justify-content: space-between;
+  border-radius: 5px 5px 0 0;
 }
-.cfg-node-body { padding: 8px 10px; line-height: 1.6; }
-.cfg-insn { display: flex; gap: 12px; }
-.cfg-mnem { color: #f43f5e; font-weight: 600; width: 52px; }
-.cfg-ops { color: #e2e8f0; }
+.cfg-node-body { padding: 6px 8px; line-height: 1.5; }
+.cfg-insn {
+  display: flex;
+  gap: 8px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.cfg-insn:hover, .cfg-insn.sync-hi { background: rgba(56, 189, 248, 0.22); }
+.cfg-va { color: #64748b; width: 58px; flex-shrink: 0; font-size: 10.5px; }
+.cfg-mnem { color: #f43f5e; font-weight: 600; width: 52px; flex-shrink: 0; }
+.cfg-ops { color: #e2e8f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .graph-controls {
-  position: fixed;
-  bottom: 42px;
-  right: 24px;
+  position: absolute;
+  bottom: 10px;
+  right: 12px;
   display: flex;
-  gap: 6px;
-  background: rgba(17, 24, 39, 0.85);
-  padding: 6px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
+  gap: 4px;
+  background: rgba(15, 23, 42, 0.9);
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
   z-index: 10;
 }
 .graph-btn {
   background: var(--bg-card);
   color: var(--text-main);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
-  width: 32px;
-  height: 32px;
+  padding: 3px 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
   cursor: pointer;
 }
+.graph-btn:hover { border-color: var(--primary); }
 
+/* Linear Disassembly Table & Code View */
 .code-view {
   flex: 1;
   overflow: auto;
-  padding: 16px;
+  padding: 10px 12px;
   background: var(--bg-dark);
   font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 12px;
+  line-height: 1.58;
 }
-.code-line { display: flex; }
-.code-num { width: 48px; color: #4b5563; user-select: none; text-align: right; padding-right: 16px; }
+.code-line {
+  display: flex;
+  padding: 1px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.code-line:hover, .code-line.sync-hi {
+  background: rgba(56, 189, 248, 0.18);
+}
+.code-num {
+  width: 38px;
+  color: #475569;
+  user-select: none;
+  text-align: right;
+  padding-right: 12px;
+  flex-shrink: 0;
+}
 .code-text { flex: 1; color: #e2e8f0; white-space: pre; }
 .kw { color: #f43f5e; font-weight: 600; }
 .type { color: var(--primary); }
 .func { color: #34d399; font-weight: 600; }
 .num { color: #fbbf24; }
+.str-lit { color: #a3e635; }
+.cmt { color: #64748b; font-style: italic; }
+
+/* Bottom Dock: Hex + 14-Format Inspector + Console + Mitigations */
+.bottom-dock {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-dark);
+  min-height: 190px;
+}
+.bottom-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+.bottom-tab-panel {
+  display: none;
+  flex: 1;
+  overflow: hidden;
+}
+.bottom-tab-panel.active {
+  display: flex;
+}
 
 .hex-split { display: flex; flex: 1; overflow: hidden; }
-.hex-container { flex: 1; display: flex; flex-direction: column; overflow: hidden; font-family: var(--font-mono); font-size: 13px; }
-.hex-header { padding: 8px 16px; background: var(--bg-panel); border-bottom: 1px solid var(--border); display: flex; gap: 24px; color: var(--text-muted); font-size: 11px; }
-.hex-body { flex: 1; overflow-y: auto; padding: 10px 16px; line-height: 1.6; }
-.hex-row { display: flex; gap: 24px; }
-.hex-offset { color: var(--accent); user-select: none; width: 90px; }
-.hex-bytes { display: flex; gap: 8px; color: #cbd5e1; }
-.hex-byte:hover { background: var(--primary); color: #0a0e17; border-radius: 2px; cursor: pointer; }
-.hex-ascii { color: #94a3b8; letter-spacing: 1px; }
+.hex-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.hex-header {
+  padding: 5px 14px;
+  background: #0b1120;
+  border-bottom: 1px solid var(--border-strong);
+  display: flex;
+  gap: 20px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.hex-body { flex: 1; overflow-y: auto; padding: 8px 14px; line-height: 1.55; }
+.hex-row { display: flex; gap: 18px; padding: 1px 4px; border-radius: 3px; }
+.hex-row.sync-hi { background: rgba(56, 189, 248, 0.2); }
+.hex-offset { color: var(--accent); user-select: none; width: 84px; flex-shrink: 0; }
+.hex-bytes { display: flex; gap: 6px; color: #cbd5e1; }
+.hex-byte { padding: 0 2px; border-radius: 2px; cursor: pointer; }
+.hex-byte:hover { background: var(--primary); color: #090d16; }
+.hex-ascii { color: #94a3b8; letter-spacing: 1px; white-space: pre; }
 
 .inspector-drawer {
   width: 340px;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border);
-  padding: 14px;
+  border-left: 1px solid var(--border-strong);
+  padding: 10px 12px;
   overflow-y: auto;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
 }
-.insp-row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.insp-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
 .insp-key { color: var(--text-muted); }
-.insp-val { color: var(--primary); font-weight: 600; text-align: right; max-width: 195px; overflow: hidden; text-overflow: ellipsis; }
+.insp-val {
+  color: var(--primary);
+  font-weight: 600;
+  text-align: right;
+  max-width: 195px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .hud-grid {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
+  padding: 12px 16px;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
 }
 .hud-card {
   background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   position: relative;
 }
-.hud-card::before { content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: var(--primary); }
+.hud-card::before { content: ''; position: absolute; top: 0; left: 0; width: 3px; height: 100%; background: var(--primary); }
 .hud-card.pass::before { background: var(--success); }
 .hud-card.fail::before { background: var(--danger); }
-.hud-title { font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 700; }
-.hud-val { font-size: 16px; font-weight: 800; font-family: var(--font-mono); }
-.hud-desc { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+.hud-title { font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; font-weight: 700; }
+.hud-val { font-size: 13.5px; font-weight: 800; font-family: var(--font-mono); }
+.hud-desc { font-size: 11px; color: var(--text-muted); line-height: 1.35; }
+
+/* In-App Non-Blocking Command Modal (Zero window.prompt!) */
+.modal-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(9, 13, 22, 0.78);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+}
+.modal-backdrop.open { display: flex; }
+.modal-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  width: 440px;
+  padding: 16px;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.75);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.modal-title { font-family: var(--font-mono); font-weight: 700; color: var(--primary); font-size: 13px; }
+.modal-field { display: flex; flex-direction: column; gap: 4px; }
+.modal-field label { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+.modal-field input, .modal-field select {
+  background: var(--bg-dark);
+  border: 1px solid var(--border-strong);
+  color: var(--text-main);
+  padding: 7px 10px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 
 footer {
-  height: 28px;
-  background: #0f172a;
-  border-top: 1px solid var(--border);
+  height: 26px;
+  background: #0b1120;
+  border-top: 1px solid var(--border-strong);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -365,6 +645,7 @@ footer {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-muted);
+  flex-shrink: 0;
 }
 .status-left, .status-right { display: flex; gap: 16px; }
 .status-item strong { color: var(--text-main); }
@@ -375,138 +656,227 @@ footer {
 <header>
   <div class="brand">
     <div class="brand-logo">9R0JE6T R10T // R3V3R53-F0RG3</div>
-    <span class="badge" id="binary-format-badge">PE x64</span>
-    <span style="font-size:12px;color:var(--text-muted)" id="binary-name-label">Drop or Upload Binary</span>
+    <span class="badge" id="binary-format-badge">ELF / PE / Mach-O</span>
+    <span class="badge badge-accent" id="active-func-badge">main @ 0x4730</span>
+    <span style="font-size:11.5px;color:var(--text-muted);font-family:var(--font-mono);" id="binary-name-label">Ready</span>
   </div>
 
   <nav class="nav-tabs">
     <button class="nav-tab active" onclick="switchView('cfg')"><span>⬡ Graph CFG</span> <kbd>Space</kbd></button>
-    <button class="nav-tab" onclick="switchView('decomp')"><span>⚙ 8-Pass Decompiled C</span> <kbd>F5</kbd></button>
-    <button class="nav-tab" onclick="switchView('hex')"><span># Hex Inspector</span></button>
-    <button class="nav-tab" onclick="switchView('intel')"><span>🧠 Capabilities & Ask</span></button>
-    <button class="nav-tab" onclick="switchView('xrefs')"><span>🔗 Xrefs</span></button>
-    <button class="nav-tab" onclick="switchView('hud')"><span>🛡 Mitigations HUD</span></button>
-    <button class="nav-tab" onclick="switchView('pipe')"><span>⚡ 12-Stage Pipeline</span></button>
+    <button class="nav-tab" onclick="switchView('disasm')"><span>≡ Disassembly</span></button>
+    <button class="nav-tab" onclick="switchView('decomp')"><span>⚙ Decompiled C</span> <kbd>F5</kbd></button>
+    <button class="nav-tab" onclick="switchBottomTab('hex')"><span># Hex Inspector</span></button>
+    <button class="nav-tab" onclick="switchBottomTab('hud')"><span>🛡 Mitigations HUD</span></button>
+    <button class="nav-tab" onclick="switchBottomTab('console')"><span>🦀 Rust & Triage Console</span></button>
   </nav>
 
   <div class="header-actions">
-    <input type="text" id="smart-query-input" class="query-bar" placeholder="Ask binary (network, compiler, 0x401000)..." onkeydown="if(event.key==='Enter')runSmartQuery()">
+    <input type="text" id="smart-query-input" class="query-bar" placeholder="Search or Ask (main, 0x4730, network, yara)..." onkeydown="if(event.key==='Enter')runSmartQuery()">
     <button class="btn" onclick="runSmartQuery()">Ask</button>
     <input type="file" id="file-upload-input" style="display:none" onchange="uploadBinaryFile(this.files[0])">
-    <button class="btn btn-primary" onclick="document.getElementById('file-upload-input').click()"><span>Upload Binary</span></button>
-    <button class="btn" onclick="loadSampleBinary()"><span>Open Path</span></button>
+    <button class="btn btn-primary" onclick="document.getElementById('file-upload-input').click()"><span>📂 Upload Binary</span></button>
+    <button class="btn" onclick="loadBinaryFromServer('/bin/ls')" title="One-click load /bin/ls (158 functions)"><span>⚡ Load /bin/ls</span></button>
+    <button class="btn" onclick="openPathModal()"><span>Open Path</span></button>
   </div>
 </header>
 
 <div class="sub-toolbar">
   <div class="toolbar-group">
-    <span style="color:var(--text-muted);font-family:var(--font-mono);">DEBUGGER RSP:</span>
-    <button class="btn" onclick="debuggerStep()"><span>⏮ Step Into</span> <kbd>F7</kbd></button>
+    <span style="color:var(--text-muted);font-family:var(--font-mono);font-size:11px;">DEBUGGER:</span>
+    <button class="btn" onclick="debuggerStep()"><span>⏮ Step</span> <kbd>F7</kbd></button>
     <button class="btn" onclick="debuggerContinue()"><span>▶ Continue</span> <kbd>F9</kbd></button>
-    <button class="btn" onclick="debuggerToggleBP()"><span>🔴 Breakpoint</span> <kbd>F2</kbd></button>
-    <span id="dbg-rip-badge" style="font-family:var(--font-mono);color:var(--success);margin-left:8px;">RIP: 0x00401000</span>
+    <button class="btn" onclick="debuggerToggleBP()"><span>🔴 BP</span> <kbd>F2</kbd></button>
+    <span id="dbg-rip-badge" style="font-family:var(--font-mono);color:var(--success);font-size:11px;margin:0 6px;">RIP: 0x00401000</span>
   </div>
   <div class="toolbar-group">
-    <button class="btn" onclick="promptRenameSymbol()"><span>✏ Rename Symbol</span> <kbd>N</kbd></button>
-    <button class="btn" onclick="promptAddComment()"><span>💬 Add Comment</span> <kbd>;</kbd></button>
-    <button class="btn" onclick="runCPUEmulation()"><span>🚀 Emulate Entry (CPU)</span></button>
-    <button class="btn" onclick="promptLivePatch()"><span>🩹 Live Patch Binary</span></button>
-    <button class="btn" onclick="runVulnAudit()"><span>🛡 CWE Vuln Scan</span></button>
-    <button class="btn" onclick="runYaraGenerator()"><span>🧬 Generate YARA/SIGMA</span></button>
-    <button class="btn" onclick="runLayer2Bridge()"><span>🌉 Layer-2 Bridge</span></button>
-    <button class="btn" onclick="exportCHeader()"><span>⬇ Export .h Header</span></button>
-    <button class="btn" onclick="runFullPipeline()"><span>⚡ Execute 12-Stage Audit</span></button>
+    <button class="btn" onclick="openRenameModal()"><span>✏ Rename</span> <kbd>N</kbd></button>
+    <button class="btn" onclick="openCommentModal()"><span>💬 Comment</span> <kbd>;</kbd></button>
+    <button class="btn" onclick="openJumpModal()"><span>🎯 Jump</span> <kbd>G</kbd></button>
+    <button class="btn" onclick="openPatchModal()"><span>🩹 Patch Bytes</span></button>
+    <button class="btn" onclick="runCPUEmulation()"><span>🚀 Emulate CPU</span></button>
+    <button class="btn" onclick="runForceExecVisor()"><span>🔥 Force-Exec Visor</span></button>
+    <button class="btn" onclick="runVulnAudit()"><span>🛡 CWE Audit</span></button>
+    <button class="btn" onclick="runYaraGenerator()"><span>🧬 YARA/SIGMA</span></button>
+    <button class="btn btn-rust" onclick="runNativeRustOmniAudit()"><span>🦀 Rust Omni-Audit (55 Modules)</span></button>
+    <button class="btn" onclick="exportCHeader()"><span>⬇ .h Header</span></button>
+    <button class="btn" onclick="runFullPipeline()"><span>⚡ 12-Stage Report</span></button>
   </div>
 </div>
 
-<div class="workspace">
+<!-- 4-Pane Synchronized Split Workspace -->
+<div class="workspace-root">
+  <!-- Pane 1: Left Function & Symbol Dock -->
   <aside class="sidebar">
-    <div class="sidebar-header">
-      <input type="text" id="filter-input" class="search-input" placeholder="Filter symbols or strings (/) ..." oninput="filterSidebar(this.value)">
-      <div class="sidebar-tabs">
-        <button class="sidebar-tab active" id="tab-btn-funcs" onclick="switchSidebarTab('funcs')">Functions (<span id="funcs-count">0</span>)</button>
-        <button class="sidebar-tab" id="tab-btn-strings" onclick="switchSidebarTab('strings')">Strings (<span id="strings-count">0</span>)</button>
-        <button class="sidebar-tab" id="tab-btn-sections" onclick="switchSidebarTab('sections')">Sections</button>
-      </div>
+    <div class="sidebar-tabs">
+      <button class="sidebar-tab active" id="tab-btn-funcs" onclick="switchSidebarTab('funcs')">Funcs (<span id="funcs-count">0</span>)</button>
+      <button class="sidebar-tab" id="tab-btn-strings" onclick="switchSidebarTab('strings')">Strings (<span id="strings-count">0</span>)</button>
+      <button class="sidebar-tab" id="tab-btn-sections" onclick="switchSidebarTab('sections')">Sections</button>
+      <button class="sidebar-tab" id="tab-btn-xrefs" onclick="switchSidebarTab('xrefs')">Xrefs</button>
+    </div>
+    <div class="sidebar-search">
+      <input type="text" id="filter-input" placeholder="Filter functions / symbols / strings (/) ..." oninput="filterSidebar()">
     </div>
     <div class="sidebar-list" id="sidebar-list"></div>
   </aside>
 
-  <main class="main-stage">
-    <!-- CFG Graph View -->
-    <div class="view-panel active" id="view-cfg">
-      <div class="cfg-container" id="cfg-container">
-        <svg class="cfg-canvas" id="cfg-svg" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <marker id="arrow-true" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#22c55e"/></marker>
-            <marker id="arrow-false" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#ef4444"/></marker>
-            <marker id="arrow-direct" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/></marker>
-          </defs>
-          <g id="cfg-links-layer"></g>
-        </svg>
-        <div id="cfg-nodes-layer"></div>
-        <div class="graph-controls">
-          <button class="graph-btn" onclick="zoomGraph(1.15)">+</button>
-          <button class="graph-btn" onclick="zoomGraph(0.85)">−</button>
-          <button class="graph-btn" onclick="resetGraphZoom()">⤾</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Decompiled C View -->
-    <div class="view-panel" id="view-decomp">
-      <div class="code-view" id="code-content"></div>
-    </div>
-
-    <!-- Hex & 14-Type Data Inspector View -->
-    <div class="view-panel" id="view-hex">
-      <div class="hex-split">
-        <div class="hex-container">
-          <div class="hex-header">
-            <div style="width:90px">Offset (VA)</div>
-            <div style="width:380px">00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F</div>
-            <div>Decoded ASCII</div>
+  <!-- Right 3 Panes: Top Split (CFG/Disasm + Decompiled C/Multi-IR) & Bottom Dock (Hex/Inspector/Console/HUD) -->
+  <div class="center-dock-column">
+    <div class="top-split-row">
+      <!-- Pane 2: Center-Left CFG Graph & Linear Disassembly -->
+      <div class="pane-box" id="left-center-pane">
+        <div class="pane-header">
+          <div class="pane-title">
+            <span>DISASSEMBLY & CONTROL-FLOW GRAPH</span>
+            <span id="cfg-stats-badge" style="color:var(--primary)"></span>
           </div>
-          <div class="hex-body" id="hex-rows"></div>
+          <div class="pane-subtabs">
+            <button class="pane-subtab active" id="subtab-cfg" onclick="switchLeftPaneMode('cfg')">⬡ Graph CFG</button>
+            <button class="pane-subtab" id="subtab-disasm" onclick="switchLeftPaneMode('disasm')">≡ Linear ASM</button>
+          </div>
         </div>
-        <div class="inspector-drawer" id="data-inspector-drawer">
-          <div style="font-weight:700;color:var(--primary);margin-bottom:10px;">IMHEX 14-TYPE DATA INSPECTOR</div>
-          <div id="inspector-rows">Click any byte or run an address query to decode 8/16/32/64-bit ints, floats, timestamps, GUIDs, and disassembly.</div>
+
+        <!-- Interactive Pan/Zoom CFG Canvas -->
+        <div id="cfg-canvas" onmousedown="startCfgPan(event)" onmousemove="moveCfgPan(event)" onmouseup="endCfgPan()" onmouseleave="endCfgPan()" onwheel="wheelCfgZoom(event)">
+          <div id="cfg-viewport">
+            <svg id="cfg-links-layer" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <marker id="arrow-true" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#22c55e" />
+                </marker>
+                <marker id="arrow-false" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#ef4444" />
+                </marker>
+              </defs>
+            </svg>
+            <div id="cfg-nodes-layer"></div>
+          </div>
+          <div class="graph-controls">
+            <button class="graph-btn" onclick="zoomGraph(1.2)" title="Zoom In">+</button>
+            <button class="graph-btn" onclick="zoomGraph(0.82)" title="Zoom Out">−</button>
+            <button class="graph-btn" onclick="resetGraphZoom()" title="Reset Pan/Zoom">Center</button>
+          </div>
         </div>
+
+        <!-- Linear Disassembly View -->
+        <div id="disasm-view" class="code-view" style="display:none;"></div>
+      </div>
+
+      <!-- Pane 3: Center-Right Synchronized Decompiler & Multi-IR -->
+      <div class="pane-box" id="right-center-pane">
+        <div class="pane-header">
+          <div class="pane-title">
+            <span>SYNCHRONIZED DECOMPILER & MULTI-IR</span>
+          </div>
+          <div class="pane-subtabs">
+            <button class="pane-subtab active" id="irtab-c" onclick="switchIrTab('c')">Decompiled C</button>
+            <button class="pane-subtab" id="irtab-pcode" onclick="switchIrTab('pcode')">Ghidra P-Code</button>
+            <button class="pane-subtab" id="irtab-esil" onclick="switchIrTab('esil')">Rizin ESIL</button>
+            <button class="pane-subtab" id="irtab-vex" onclick="switchIrTab('vex')">angr VEX</button>
+          </div>
+        </div>
+        <div id="code-content" class="code-view"></div>
       </div>
     </div>
 
-    <!-- Capabilities & Smart Query View -->
-    <div class="view-panel" id="view-intel">
-      <div class="hud-grid" id="intel-grid"></div>
-    </div>
+    <!-- Pane 4: Bottom Synchronized Hex, 14-Format Inspector, Console & Mitigations HUD -->
+    <div class="bottom-dock">
+      <div class="pane-header">
+        <div class="pane-title">
+          <span>SYNCHRONIZED HEX INSPECTOR, SECURITY HUD & NATIVE ENGINE CONSOLE</span>
+        </div>
+        <div class="pane-subtabs">
+          <button class="pane-subtab active" id="btab-hex" onclick="switchBottomTab('hex')"># Hex & 14-Format Inspector</button>
+          <button class="pane-subtab" id="btab-console" onclick="switchBottomTab('console')">🦀 Engine Output & Triage Console</button>
+          <button class="pane-subtab" id="btab-hud" onclick="switchBottomTab('hud')">🛡 Mitigations HUD</button>
+          <button class="pane-subtab" id="btab-intel" onclick="switchBottomTab('intel')">🧠 Capabilities & Strings</button>
+        </div>
+      </div>
 
-    <!-- Cross-References View -->
-    <div class="view-panel" id="view-xrefs">
-      <div class="code-view" id="xrefs-content"></div>
-    </div>
+      <div class="bottom-body">
+        <!-- Bottom Tab 1: Synchronized Hex + 14-Format Data Inspector -->
+        <div class="bottom-tab-panel active" id="bpanel-hex">
+          <div class="hex-split">
+            <div class="hex-container">
+              <div class="hex-header">
+                <span style="width:84px">VA / OFFSET</span>
+                <span style="flex:1">00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F</span>
+                <span style="width:140px">ASCII</span>
+              </div>
+              <div class="hex-body" id="hex-rows"></div>
+            </div>
+            <div class="inspector-drawer">
+              <div style="font-weight:700;color:var(--primary);margin-bottom:6px;border-bottom:1px solid var(--border-strong);padding-bottom:4px;">
+                IMHEX 14-FORMAT DATA INSPECTOR
+              </div>
+              <div id="inspector-rows">
+                <div class="insp-row"><span class="insp-key">Click any byte or instruction</span><span class="insp-val">Ready</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
 
-    <!-- Mitigations HUD View -->
-    <div class="view-panel" id="view-hud">
-      <div class="hud-grid" id="hud-grid"></div>
-    </div>
+        <!-- Bottom Tab 2: Interactive Engine Output & Native Rust Console -->
+        <div class="bottom-tab-panel" id="bpanel-console">
+          <div style="display:flex;flex:1;overflow:hidden;">
+            <div style="width:230px;background:var(--bg-panel);border-right:1px solid var(--border-strong);padding:8px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;">
+              <div style="font-size:10.5px;font-weight:700;color:var(--text-muted);margin-bottom:4px;font-family:var(--font-mono);">ONE-CLICK NATIVE RUST ENGINES</div>
+              <button class="btn" onclick="execNativeRustCmd('omni-audit')">🦀 200-Phase Master Audit</button>
+              <button class="btn" onclick="execNativeRustCmd('die-scan')">📦 Detect-It-Easy (DIE) Scan</button>
+              <button class="btn" onclick="execNativeRustCmd('sleigh-lift')">⚙ Ghidra SLEIGH ARM64/RV64C</button>
+              <button class="btn" onclick="execNativeRustCmd('esil')">🧮 Rizin ESIL RPN Evaluator</button>
+              <button class="btn" onclick="execNativeRustCmd('vex-lift')">🔬 angr VEX + Claripy Solver</button>
+              <button class="btn" onclick="execNativeRustCmd('yara-ac')">🧬 YARA Aho-Corasick $O(N)$</button>
+              <button class="btn" onclick="execNativeRustCmd('softmmu')">🦄 Unicorn SoftMMU + CoW TLB</button>
+              <button class="btn" onclick="execNativeRustCmd('typefactory')">🏗 Ghidra TypeFactory Structs</button>
+              <button class="btn" onclick="execNativeRustCmd('wl-bindiff')">🔀 Diaphora WL Graph Diff</button>
+              <button class="btn" onclick="execNativeRustCmd('galileo-cfi')">🛡 Galileo CFI / CET Audit</button>
+              <button class="btn" onclick="execNativeRustCmd('frida-stalker')">🪝 Frida Stalker Relocator</button>
+              <button class="btn" onclick="execNativeRustCmd('volatility3')">🧠 Volatility3 IA-32e Walker</button>
+              <button class="btn" onclick="execNativeRustCmd('pesieve')">🔍 PE-sieve Inline Hook Scan</button>
+              <button class="btn" onclick="execNativeRustCmd('triton-dse')">🎯 Triton / SymCC Branch Flip</button>
+              <button class="btn" onclick="execNativeRustCmd('rr-timetravel')">⏪ Mozilla rr Time-Travel</button>
+              <button class="btn" onclick="execNativeRustCmd('qbdi-drcov')">📊 QBDI Shadow-Stack & drcov</button>
+            </div>
+            <pre id="console-output" class="code-view" style="margin:0;white-space:pre-wrap;color:#e2e8f0;">[R3V3R53//F0RG3 Studio v27.0 Ready]
+• Click "⚡ Load /bin/ls" or "📂 Upload Binary" in the top bar to index all functions, PLT/GOT symbols, and strings.
+• Click any function in the left sidebar to disassemble, build its Sugiyama CFG, and decompile it to C / P-Code / ESIL / VEX in &lt;15ms.</pre>
+          </div>
+        </div>
 
-    <!-- 12-Stage Pipeline View -->
-    <div class="view-panel" id="view-pipe">
-      <div class="code-view" id="pipeline-content" style="padding:20px;">Click "⚡ Execute 12-Stage Audit" in the toolbar to run the full autonomous vulnerability & remediation pipeline on the loaded binary.</div>
+        <!-- Bottom Tab 3: Mitigations HUD -->
+        <div class="bottom-tab-panel" id="bpanel-hud">
+          <div class="hud-grid" id="hud-grid"></div>
+        </div>
+
+        <!-- Bottom Tab 4: Capabilities & Smart Query Results -->
+        <div class="bottom-tab-panel" id="bpanel-intel">
+          <div class="hud-grid" id="intel-grid"></div>
+        </div>
+      </div>
     </div>
-  </main>
+  </div>
+</div>
+
+<!-- In-App Non-Blocking Action Modal -->
+<div class="modal-backdrop" id="action-modal">
+  <div class="modal-card">
+    <div class="modal-title" id="modal-title">Action</div>
+    <div id="modal-fields"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeActionModal()">Cancel <kbd>Esc</kbd></button>
+      <button class="btn btn-primary" id="modal-submit-btn">Apply <kbd>Enter</kbd></button>
+    </div>
+  </div>
 </div>
 
 <footer>
   <div class="status-left">
-    <div class="status-item">Engine: <strong>R3V3R53//F0RG3 v10.0-zenith</strong></div>
-    <div class="status-item">Internal Engines: <strong>63 Ready</strong></div>
+    <div class="status-item">Engine: <strong>R3V3R53//F0RG3 v27.0 (55 Native Rust Modules + Whole-Binary Indexer)</strong></div>
     <div class="status-item">Current VA: <strong id="status-va">0x00401000</strong></div>
   </div>
   <div class="status-right">
-    <div class="status-item">Cursor Byte: <strong id="status-byte">0x00 (0)</strong></div>
-    <div class="status-item">Status: <strong style="color:var(--success)" id="sync-status">ANALYSIS SYNCHRONIZED</strong></div>
+    <div class="status-item">Hover Byte: <strong id="status-byte">0x00 (0)</strong></div>
+    <div class="status-item">Status: <strong style="color:var(--success)" id="sync-status">READY</strong></div>
   </div>
 </footer>
 
@@ -523,63 +893,132 @@ function escHtml(val) {
 
 let appData = {
   binaryPath: "",
-  format: "PE",
-  architecture: "x64 (64-bit AMD64)",
-  entryPoint: "0x11d430",
+  currentBinaryPath: "",
+  format: "ELF",
+  architecture: "x86-64 (AMD64)",
+  entryPoint: "0x4730",
+  activeFunctionName: "main",
+  activeFunctionVa: "0x4730",
   functions: [
-    { name: "entry", addr: "0x11d430", size: 64, type: "entry" },
-    { name: "setup_security_guards", addr: "0x11d800", size: 96, type: "sub" }
+    { name: "main", addr: "0x4730", size: 420, kind: "main", call_count: 1 },
+    { name: "_start", addr: "0x61d0", size: 48, kind: "entry", call_count: 1 }
   ],
   strings: [
-    { value: "https://edge.microsoft.com", type: "urls", addr: "0x3be410" }
+    { value: "coreutils", type: "rodata", addr: "0x1bbfc" },
+    { value: "/usr/share/locale", type: "rodata", addr: "0x1bc2e" }
   ],
   sections: [
-    { name: ".text", vaddr: "0x1000", vsize: 3917845, entropy: 6.51, perms: "R-X" }
+    { name: ".text", vaddr: "0x46b0", vsize: 86174, perms: "R-X" },
+    { name: ".rodata", vaddr: "0x1a000", vsize: 20346, perms: "R--" }
   ],
   mitigations: {
-    "Address Space Layout Randomization (ASLR)": { pass: true, val: "Enabled (High-Entropy VA 64-bit)" },
-    "Data Execution Prevention (DEP / NX)": { pass: true, val: "Enforced (Hardware NX Bit)" }
+    "ASLR / PIE": { pass: true, val: "Enabled (Position-Independent Executable)" },
+    "DEP / NX": { pass: true, val: "Enforced (PT_GNU_STACK R-W)" },
+    "Stack Canary": { pass: true, val: "Active (__stack_chk_fail / fs:[0x28])" }
   },
-  capabilities: [
-    { capability_id: "CAP-NET-001", name: "Perform Network Socket / HTTP Communication", mitre_attack: "T1071.001", severity: "MEDIUM", matched_indicators: ["string:https://edge.microsoft.com"], description: "Outbound/inbound network communication indicators." }
-  ],
-  xrefs: [
-    { from_va: "0x11d43a", to_va: "0x11d800", xref_type: "CALL_REL32", instruction: "call 0x11d800", resolved_target_preview: "setup_security_guards" }
+  capabilities: [],
+  xrefs: [],
+  disassemblyLines: [
+    { va: "0x4730", bytes: "4157", mnem: "push", ops: "r15", comment: "" },
+    { va: "0x4746", bytes: "4c8d25af740100", mnem: "lea", ops: "r12, [rip + 0x174af]", comment: "\"coreutils\" (@ 0x1bbfc)" },
+    { va: "0x4781", bytes: "e84afdffff", mnem: "call", ops: "setlocale@plt (0x44d0)", comment: "" },
+    { va: "0x4790", bytes: "e84bfaffff", mnem: "call", ops: "bindtextdomain@plt (0x41e0)", comment: "" },
+    { va: "0x479f", bytes: "e8fcf9ffff", mnem: "call", ops: "textdomain@plt (0x41a0)", comment: "" }
   ],
   cfgBlocks: [
     {
-      id: 0, x: 240, y: 40, label: "entry_main: 0x11d430",
-      insns: [{ mnem: "push", ops: "rbp" }, { mnem: "mov", ops: "rbp, rsp" }, { mnem: "call", ops: "setup_security_guards" }, { mnem: "ret", ops: "" }],
+      id: 0, x: 180, y: 36, addr: "0x4730", label: "main: 0x4730",
+      insns: [
+        { va: "0x4730", mnem: "push", ops: "r15" },
+        { va: "0x4746", mnem: "lea", ops: "r12, [rip + 0x174af] ; \"coreutils\"" },
+        { va: "0x4781", mnem: "call", ops: "setlocale@plt (0x44d0)" },
+        { va: "0x4790", mnem: "call", ops: "bindtextdomain@plt (0x41e0)" },
+        { va: "0x479f", mnem: "call", ops: "textdomain@plt (0x41a0)" }
+      ],
       successors: []
     }
   ],
   hexRows: [],
   pseudocode: [
-    "// Decompiled with R3V3R53//F0RG3 8-Pass Unified Decompiler Pipeline",
-    "int entry_main(long arg1, long arg2, long arg3) {",
-    "    int var_eax = 0;",
-    "    var_eax = setup_security_guards();",
-    "    return var_eax;",
+    "// Function: main @ 0x4730",
+    "int main(int argc, char** argv) {",
+    "    uint64_t stack_canary = __readfsqword(0x28);             // @ 0x475b",
+    "    rax = setlocale(0x6, \"\");                                // @ 0x4781",
+    "    rax = bindtextdomain(\"coreutils\", \"/usr/share/locale\");  // @ 0x4790",
+    "    rax = textdomain(\"coreutils\");                           // @ 0x479f",
+    "    return rax;",
     "}"
-  ]
+  ],
+  pcodeText: "0x4781: rax = CALL setlocale(0x6, \"\")\n0x4790: rax = CALL bindtextdomain(\"coreutils\", \"/usr/share/locale\")\n0x479f: rax = CALL textdomain(\"coreutils\")",
+  esilText: "0x4781: setlocale,CALL\n0x4790: bindtextdomain,CALL\n0x479f: textdomain,CALL",
+  vexText: "IRSB { addr=0x4730, arch=\"x64\" }\n   CALL setlocale(0x6, \"\")\n   CALL bindtextdomain(\"coreutils\", \"/usr/share/locale\")"
 };
 
 let activeSidebarTab = 'funcs';
+let activeIrTab = 'c';
 let currentZoom = 1.0;
+let panX = 0, panY = 0;
+let isPanning = false, panStartX = 0, panStartY = 0;
+
+function setStatus(msg, color) {
+  const el = document.getElementById('sync-status');
+  el.innerText = msg;
+  el.style.color = color || 'var(--success)';
+}
+
+function logConsole(title, bodyText) {
+  switchBottomTab('console');
+  const out = document.getElementById('console-output');
+  const ts = new Date().toLocaleTimeString();
+  out.textContent = `[${ts}] === ${title} ===\n${bodyText}\n\n` + out.textContent;
+}
+
+function switchLeftPaneMode(mode) {
+  document.getElementById('subtab-cfg').classList.toggle('active', mode === 'cfg');
+  document.getElementById('subtab-disasm').classList.toggle('active', mode === 'disasm');
+  document.getElementById('cfg-canvas').style.display = (mode === 'cfg') ? 'block' : 'none';
+  document.getElementById('disasm-view').style.display = (mode === 'disasm') ? 'block' : 'none';
+}
 
 function switchView(viewId) {
-  document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-  const target = document.getElementById('view-' + viewId);
-  if (target) target.classList.add('active');
   const tabBtn = Array.from(document.querySelectorAll('.nav-tab')).find(b => (b.getAttribute('onclick') || '').includes(viewId));
   if (tabBtn) tabBtn.classList.add('active');
+
+  if (viewId === 'cfg') {
+    switchLeftPaneMode('cfg');
+  } else if (viewId === 'disasm') {
+    switchLeftPaneMode('disasm');
+  } else if (viewId === 'decomp') {
+    switchIrTab('c');
+  } else if (viewId === 'hex' || viewId === 'hud' || viewId === 'intel' || viewId === 'console') {
+    switchBottomTab(viewId);
+  }
+}
+
+function switchIrTab(tab) {
+  activeIrTab = tab;
+  ['c', 'pcode', 'esil', 'vex'].forEach(k => {
+    const btn = document.getElementById('irtab-' + k);
+    if (btn) btn.classList.toggle('active', k === tab);
+  });
+  renderDecomp();
+}
+
+function switchBottomTab(tab) {
+  ['hex', 'console', 'hud', 'intel'].forEach(k => {
+    const b = document.getElementById('btab-' + k);
+    const p = document.getElementById('bpanel-' + k);
+    if (b) b.classList.toggle('active', k === tab);
+    if (p) p.classList.toggle('active', k === tab);
+  });
 }
 
 function switchSidebarTab(tab) {
   activeSidebarTab = tab;
   document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
-  document.getElementById('tab-btn-' + tab).classList.add('active');
+  const btn = document.getElementById('tab-btn-' + tab);
+  if (btn) btn.classList.add('active');
   renderSidebar();
 }
 
@@ -589,43 +1028,153 @@ function renderSidebar() {
   const filter = (document.getElementById('filter-input').value || '').toLowerCase();
 
   if (activeSidebarTab === 'funcs') {
-    appData.functions.filter(f => f.name.toLowerCase().includes(filter) || f.addr.includes(filter)).forEach(f => {
-      const el = document.createElement('div');
-      el.className = 'list-item';
-      el.innerHTML = `<span class="item-name">${escHtml(f.name)}</span><span class="item-addr">${escHtml(f.addr)}</span>`;
-      el.onclick = () => jumpToAddress(f.addr);
-      container.appendChild(el);
-    });
+    appData.functions
+      .filter(f => f.name.toLowerCase().includes(filter) || String(f.addr).toLowerCase().includes(filter))
+      .forEach(f => {
+        const el = document.createElement('div');
+        const isActive = (String(f.addr).toLowerCase() === String(appData.activeFunctionVa).toLowerCase());
+        el.className = 'list-item' + (isActive ? ' active' : '');
+        const kind = f.kind || 'sub';
+        const pill = `<span class="kind-pill kind-${escHtml(kind)}">${escHtml(kind === 'plt_import' ? 'PLT' : kind)}</span>`;
+        el.innerHTML = `
+          <span class="item-name" title="${escHtml(f.name)}">${escHtml(f.name)}</span>
+          <span class="item-meta">${pill}<span class="item-addr">${escHtml(f.addr)}</span></span>
+        `;
+        el.onclick = () => selectAndDecompileFunction(f.addr, f.name);
+        container.appendChild(el);
+      });
   } else if (activeSidebarTab === 'strings') {
-    appData.strings.filter(s => s.value.toLowerCase().includes(filter)).forEach(s => {
-      const el = document.createElement('div');
-      el.className = 'list-item';
-      el.innerHTML = `<span class="item-name" title="${escHtml(s.value)}">"${escHtml(s.value)}"</span><span class="item-addr">${escHtml(s.addr)}</span>`;
-      el.onclick = () => jumpToAddress(s.addr);
-      container.appendChild(el);
-    });
+    appData.strings
+      .filter(s => s.value.toLowerCase().includes(filter) || String(s.addr).toLowerCase().includes(filter))
+      .forEach(s => {
+        const el = document.createElement('div');
+        el.className = 'list-item';
+        el.innerHTML = `<span class="item-name" title="${escHtml(s.value)}">"${escHtml(s.value)}"</span><span class="item-addr">${escHtml(s.addr)}</span>`;
+        el.onclick = () => syncHighlightAddress(s.addr);
+        container.appendChild(el);
+      });
   } else if (activeSidebarTab === 'sections') {
     appData.sections.forEach(s => {
       const el = document.createElement('div');
       el.className = 'list-item';
-      el.innerHTML = `<span class="item-name"><strong>${escHtml(s.name)}</strong> (${escHtml(s.perms || 'R-X')})</span><span class="item-addr">${escHtml(s.vaddr || s.virtual_address || '0x0')}</span>`;
+      const va = s.vaddr || s.virtual_address || '0x0';
+      el.innerHTML = `<span class="item-name"><strong>${escHtml(s.name)}</strong> (${escHtml(s.perms || 'R-X')})</span><span class="item-addr">${escHtml(va)}</span>`;
+      el.onclick = () => loadHexAtOffset(va);
+      container.appendChild(el);
+    });
+  } else if (activeSidebarTab === 'xrefs') {
+    (appData.xrefs || []).forEach(x => {
+      const el = document.createElement('div');
+      el.className = 'list-item';
+      el.innerHTML = `<span class="item-name">${escHtml(x.from_va)} → ${escHtml(x.resolved_target_preview || x.to_va)}</span><span class="item-addr">${escHtml(x.xref_type)}</span>`;
+      el.onclick = () => selectAndDecompileFunction(x.to_va, x.resolved_target_preview);
       container.appendChild(el);
     });
   }
 }
 
+function selectAndDecompileFunction(va, nameHint) {
+  document.getElementById('status-va').innerText = va;
+  const path = appData.binaryPath || appData.currentBinaryPath;
+  if (!path) {
+    syncHighlightAddress(va);
+    return;
+  }
+  setStatus(`DECOMPILING ${nameHint || va}...`, 'var(--warning)');
+  fetch(`/api/function?path=${encodeURIComponent(path)}&addr=${encodeURIComponent(va)}`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'ok' && data.function) {
+        const fn = data.function;
+        appData.activeFunctionName = fn.name;
+        appData.activeFunctionVa = fn.addr;
+        document.getElementById('active-func-badge').innerText = `${fn.name} @ ${fn.addr}`;
+        appData.disassemblyLines = fn.disassembly_lines || [];
+        appData.cfgBlocks = fn.cfg_blocks || [];
+        appData.pseudocode = (fn.decompiled_c || '').split('\n');
+        appData.pcodeText = fn.pcode_ssa_text || '';
+        appData.esilText = fn.rizin_esil_text || '';
+        appData.vexText = fn.angr_vex_text || '';
+        if (fn.hex_rows && fn.hex_rows.length > 0) {
+          appData.hexRows = fn.hex_rows;
+        }
+        resetGraphZoom();
+        renderSidebar();
+        renderCFGGraph();
+        renderLinearDisassembly();
+        renderDecomp();
+        renderHexView();
+        inspectByteOffset(fn.addr);
+        setStatus(`SYNCHRONIZED: ${fn.name} (${appData.disassemblyLines.length} insns, ${appData.cfgBlocks.length} blocks)`, 'var(--success)');
+      } else {
+        setStatus('FUNCTION DECOMPILE ERROR', 'var(--danger)');
+      }
+    });
+}
+
+function syncHighlightAddress(va) {
+  if (!va) return;
+  const norm = String(va).toLowerCase();
+  document.getElementById('status-va').innerText = va;
+
+  document.querySelectorAll('[data-va]').forEach(el => {
+    const match = (el.getAttribute('data-va') || '').toLowerCase() === norm;
+    el.classList.toggle('sync-hi', match);
+    if (match && el.scrollIntoView) {
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  });
+
+  inspectByteOffset(va);
+}
+
+function renderLinearDisassembly() {
+  const container = document.getElementById('disasm-view');
+  container.innerHTML = '';
+  (appData.disassemblyLines || []).forEach(ins => {
+    const row = document.createElement('div');
+    row.className = 'code-line';
+    row.setAttribute('data-va', ins.va);
+    const cmt = ins.comment ? `  <span class="cmt">; ${escHtml(ins.comment)}</span>` : '';
+    row.innerHTML = `
+      <div class="code-num" style="width:76px;color:var(--primary)">${escHtml(ins.va)}</div>
+      <div class="code-num" style="width:115px;color:#64748b;text-align:left">${escHtml((ins.bytes || '').slice(0, 14))}</div>
+      <div class="code-text"><span class="kw">${escHtml(ins.mnem.padEnd(8))}</span> ${escHtml(ins.ops)}${cmt}</div>
+    `;
+    row.onclick = () => syncHighlightAddress(ins.va);
+    container.appendChild(row);
+  });
+}
+
 function renderDecomp() {
   const container = document.getElementById('code-content');
   container.innerHTML = '';
-  appData.pseudocode.forEach((line, idx) => {
+  let lines = appData.pseudocode || [];
+  if (activeIrTab === 'pcode') lines = (appData.pcodeText || '').split('\n');
+  if (activeIrTab === 'esil') lines = (appData.esilText || '').split('\n');
+  if (activeIrTab === 'vex') lines = (appData.vexText || '').split('\n');
+
+  lines.forEach((line, idx) => {
     let safeLine = escHtml(line);
+    // Extract `@ 0x...` or leading `0x...:` for bidirectional click sync
+    let lineVa = '';
+    const mAt = line.match(/@\s*(0x[0-9a-fA-F]+)/);
+    const mLead = line.match(/^\s*(0x[0-9a-fA-F]+):/);
+    if (mAt) lineVa = mAt[1];
+    else if (mLead) lineVa = mLead[1];
+
     let colored = safeLine
-      .replace(/\b(int64_t|uint64_t|int32_t|uint32_t|uint16_t|uint8_t|int|long|void|typedef|struct)\b/g, '<span class="type">$1</span>')
-      .replace(/\b(if|else|while|do|switch|case|default|break|return|__fastcall)\b/g, '<span class="kw">$1</span>')
+      .replace(/(&quot;.*?&quot;)/g, '<span class="str-lit">$1</span>')
+      .replace(/(\/\/.*$)/g, '<span class="cmt">$1</span>')
+      .replace(/\b(int64_t|uint64_t|int32_t|uint32_t|uint16_t|uint8_t|int|long|char|void|typedef|struct)\b/g, '<span class="type">$1</span>')
+      .replace(/\b(if|else|while|do|switch|case|default|break|goto|return|CALL|COPY|INT_ADD|INT_SUB|CBRANCH|RETURN)\b/g, '<span class="kw">$1</span>')
       .replace(/(\b0x[0-9a-fA-F]+\b|\b\d+\b)/g, '<span class="num">$1</span>');
+
     const row = document.createElement('div');
     row.className = 'code-line';
+    if (lineVa) row.setAttribute('data-va', lineVa);
     row.innerHTML = `<div class="code-num">${idx + 1}</div><div class="code-text">${colored}</div>`;
+    if (lineVa) row.onclick = () => syncHighlightAddress(lineVa);
     container.appendChild(row);
   });
 }
@@ -633,43 +1182,39 @@ function renderDecomp() {
 function renderHexView() {
   const container = document.getElementById('hex-rows');
   container.innerHTML = '';
-  if (appData.hexRows && appData.hexRows.length > 0) {
-    appData.hexRows.forEach(hr => {
-      const row = document.createElement('div');
-      row.className = 'hex-row';
-      const bytesSpans = (hr.bytes || []).map(bHex => {
-        const decVal = parseInt(bHex, 16) || 0;
-        return `<span class="hex-byte" onmouseover="updateHoverByte('0x${escHtml(bHex)}', ${decVal})" onclick="inspectByteOffset('${escHtml(hr.offset)}')">${escHtml(bHex)}</span>`;
-      }).join('');
-      row.innerHTML = `<div class="hex-offset">${escHtml(hr.offset)}</div><div class="hex-bytes">${bytesSpans}</div><div class="hex-ascii">${escHtml(hr.ascii)}</div>`;
-      container.appendChild(row);
-    });
-    return;
-  }
-  const baseVA = 0x00401000;
-  for (let r = 0; r < 24; r++) {
-    const rowVA = baseVA + (r * 16);
-    const rowHex = '0x' + rowVA.toString(16).padStart(8, '0');
-    let bytesHTML = '';
-    let asciiText = '';
-    for (let c = 0; c < 16; c++) {
-      const val = (rowVA + c * 7) % 256;
-      const bHex = val.toString(16).padStart(2, '0').toUpperCase();
-      const ch = (val >= 32 && val <= 126) ? String.fromCharCode(val) : '.';
-      bytesHTML += `<span class="hex-byte" onmouseover="updateHoverByte('0x${bHex}', ${val})" onclick="inspectByteOffset('${rowHex}')">${bHex}</span>`;
-      asciiText += ch;
-    }
+  const rows = (appData.hexRows && appData.hexRows.length > 0) ? appData.hexRows : [];
+  rows.forEach(hr => {
     const row = document.createElement('div');
     row.className = 'hex-row';
-    row.innerHTML = `<div class="hex-offset">${rowHex}</div><div class="hex-bytes">${bytesHTML}</div><div class="hex-ascii">${escHtml(asciiText)}</div>`;
+    row.setAttribute('data-va', hr.offset);
+    const bytesSpans = (hr.bytes || []).map(bHex => {
+      const decVal = parseInt(bHex, 16) || 0;
+      return `<span class="hex-byte" onmouseover="updateHoverByte('0x${escHtml(bHex)}', ${decVal})" onclick="inspectByteOffset('${escHtml(hr.offset)}')">${escHtml(bHex)}</span>`;
+    }).join('');
+    row.innerHTML = `<div class="hex-offset">${escHtml(hr.offset)}</div><div class="hex-bytes">${bytesSpans}</div><div class="hex-ascii">${escHtml(hr.ascii)}</div>`;
     container.appendChild(row);
-  }
+  });
+}
+
+function loadHexAtOffset(offsetHex) {
+  const path = appData.binaryPath || appData.currentBinaryPath;
+  if (!path) return;
+  fetch(`/api/hex?path=${encodeURIComponent(path)}&offset=${encodeURIComponent(offsetHex)}&rows=32`)
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'ok' && d.hex_rows) {
+        appData.hexRows = d.hex_rows;
+        renderHexView();
+        switchBottomTab('hex');
+      }
+    });
 }
 
 function inspectByteOffset(offsetHex) {
   document.getElementById('status-va').innerText = offsetHex;
-  if (!appData.binaryPath) return;
-  fetch(`/api/inspect?path=${encodeURIComponent(appData.binaryPath)}&offset=${encodeURIComponent(offsetHex)}`)
+  const path = appData.binaryPath || appData.currentBinaryPath;
+  if (!path) return;
+  fetch(`/api/inspect?path=${encodeURIComponent(path)}&offset=${encodeURIComponent(offsetHex)}`)
     .then(r => r.json())
     .then(data => {
       if (data.status === 'ok' && data.inspection) {
@@ -683,13 +1228,11 @@ function inspectByteOffset(offsetHex) {
           ['uint16 / int16', `${ins.uint16_le} / ${ins.int16_le}`],
           ['uint32 / int32', `${ins.uint32_le} / ${ins.int32_le}`],
           ['uint64', `${ins.uint64_le}`],
-          ['float32 / float64', `${ins.float32_le} / ${ins.float64_le}`],
           ['Unix Timestamp', ins.unix_timestamp_iso],
-          ['GUID / UUID', ins.guid_uuid],
           ['ASCII String', ins.ascii_string],
           ['Disassembly', (ins.disassembly_preview || []).join(' ; ')]
         ];
-        container.innerHTML = fields.map(([k, v]) => `<div class="insp-row"><span class="insp-key">${escHtml(k)}</span><span class="insp-val">${escHtml(v)}</span></div>`).join('');
+        container.innerHTML = fields.map(([k, v]) => `<div class="insp-row"><span class="insp-key">${escHtml(k)}</span><span class="insp-val" title="${escHtml(v)}">${escHtml(v)}</span></div>`).join('');
       }
     });
 }
@@ -713,18 +1256,10 @@ function renderCapabilitiesAndIntel(customResults) {
   });
 }
 
-function renderXrefs() {
-  const container = document.getElementById('xrefs-content');
-  const rows = (appData.xrefs || []).map((x, idx) =>
-    `<div class="code-line"><div class="code-num">${idx + 1}</div><div class="code-text">${escHtml(x.from_va)}  [${escHtml(x.xref_type)}]  ${escHtml(x.instruction.padEnd(28))} -> ${escHtml(x.to_va)} (${escHtml(x.resolved_target_preview || '')})</div></div>`
-  );
-  container.innerHTML = rows.join('') || '<div style="color:var(--text-muted)">No cross-references extracted yet.</div>';
-}
-
 function renderMitigationsHUD() {
   const grid = document.getElementById('hud-grid');
   grid.innerHTML = '';
-  for (const [title, info] of Object.entries(appData.mitigations)) {
+  for (const [title, info] of Object.entries(appData.mitigations || {})) {
     const isPass = typeof info === 'object' ? info.pass : Boolean(info);
     const descVal = typeof info === 'object' ? info.val : String(info);
     const card = document.createElement('div');
@@ -742,32 +1277,42 @@ function renderCFGGraph() {
   const nodesLayer = document.getElementById('cfg-nodes-layer');
   const linksLayer = document.getElementById('cfg-links-layer');
   nodesLayer.innerHTML = '';
-  linksLayer.innerHTML = '';
+  Array.from(linksLayer.querySelectorAll('path')).forEach(p => p.remove());
 
   const blocks = (appData.cfgBlocks && appData.cfgBlocks.length > 0) ? appData.cfgBlocks : [];
+  document.getElementById('cfg-stats-badge').innerText = `(${blocks.length} blocks)`;
   const addrToBlock = {};
-  blocks.forEach(b => { if (b.addr) addrToBlock[b.addr.toLowerCase()] = b; });
+  blocks.forEach(b => { if (b.addr) addrToBlock[String(b.addr).toLowerCase()] = b; });
 
   blocks.forEach(b => {
     const nodeEl = document.createElement('div');
     nodeEl.className = 'cfg-node';
     nodeEl.style.left = (b.x || 120) + 'px';
-    nodeEl.style.top = (b.y || 40) + 'px';
-    let insnHTML = (b.insns || []).map(i => `<div class="cfg-insn"><span class="cfg-mnem">${escHtml(i.mnem)}</span><span class="cfg-ops">${escHtml(i.ops)}</span></div>`).join('');
-    nodeEl.innerHTML = `<div class="cfg-node-hdr">${escHtml(b.label)}</div><div class="cfg-node-body">${insnHTML}</div>`;
+    nodeEl.style.top = (b.y || 36) + 'px';
+    let insnHTML = (b.insns || []).map(i => `
+      <div class="cfg-insn" data-va="${escHtml(i.va || b.addr)}" onclick="event.stopPropagation(); syncHighlightAddress('${escHtml(i.va || b.addr)}')">
+        <span class="cfg-va">${escHtml(i.va || '')}</span>
+        <span class="cfg-mnem">${escHtml(i.mnem)}</span>
+        <span class="cfg-ops" title="${escHtml(i.ops)}">${escHtml(i.ops)}</span>
+      </div>
+    `).join('');
+    nodeEl.innerHTML = `<div class="cfg-node-hdr"><span>${escHtml(b.label)}</span><span>#${b.id || 0}</span></div><div class="cfg-node-body">${insnHTML}</div>`;
+    nodeEl.onclick = () => syncHighlightAddress(b.addr);
     nodesLayer.appendChild(nodeEl);
   });
 
   blocks.forEach(b => {
+    const srcH = 44 + ((b.insns || []).length * 19);
     (b.successors || []).forEach((succAddr, idx) => {
       const targetBlock = addrToBlock[String(succAddr).toLowerCase()];
       if (targetBlock) {
-        const x1 = (b.x || 120) + 135, y1 = (b.y || 40) + 115;
-        const x2 = (targetBlock.x || 120) + 135, y2 = (targetBlock.y || 40);
+        const x1 = (b.x || 120) + 165, y1 = (b.y || 36) + srcH;
+        const x2 = (targetBlock.x || 120) + 165, y2 = (targetBlock.y || 36);
         const color = idx === 0 ? '#22c55e' : '#ef4444';
         const marker = idx === 0 ? 'arrow-true' : 'arrow-false';
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        path.setAttribute('d', `M ${x1} ${y1} C ${x1} ${(y1+y2)/2}, ${x2} ${(y1+y2)/2}, ${x2} ${y2}`);
+        const midY = (y1 + y2) / 2;
+        path.setAttribute('d', `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`);
         path.setAttribute('stroke', color);
         path.setAttribute('stroke-width', '2');
         path.setAttribute('fill', 'none');
@@ -778,43 +1323,173 @@ function renderCFGGraph() {
   });
 }
 
+/* Pan & Wheel Zoom for CFG Canvas */
+function applyCfgTransform() {
+  const vp = document.getElementById('cfg-viewport');
+  vp.style.transform = `translate(${panX}px, ${panY}px) scale(${currentZoom})`;
+}
+function startCfgPan(e) {
+  if (e.target.closest('.cfg-node') || e.target.closest('.graph-controls')) return;
+  isPanning = true;
+  panStartX = e.clientX - panX;
+  panStartY = e.clientY - panY;
+}
+function moveCfgPan(e) {
+  if (!isPanning) return;
+  panX = e.clientX - panStartX;
+  panY = e.clientY - panStartY;
+  applyCfgTransform();
+}
+function endCfgPan() { isPanning = false; }
+function wheelCfgZoom(e) {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.12 : 0.89;
+  currentZoom = Math.min(2.5, Math.max(0.25, currentZoom * factor));
+  applyCfgTransform();
+}
+function zoomGraph(factor) {
+  currentZoom = Math.min(2.5, Math.max(0.25, currentZoom * factor));
+  applyCfgTransform();
+}
+function resetGraphZoom() {
+  currentZoom = 1.0;
+  panX = 0;
+  panY = 0;
+  applyCfgTransform();
+}
+
 function updateHoverByte(hexStr, decVal) {
   document.getElementById('status-byte').innerText = `${hexStr} (${decVal})`;
 }
 
-function jumpToAddress(va) {
-  document.getElementById('status-va').innerText = va;
-  inspectByteOffset(va);
-  switchView('decomp');
-}
-
-function promptJump() {
-  const target = prompt("Enter Virtual Address or Offset to inspect (e.g. 0x401000):", appData.entryPoint);
-  if (target) jumpToAddress(target);
-}
-
 function filterSidebar() { renderSidebar(); }
-function zoomGraph(factor) {
-  currentZoom *= factor;
-  document.getElementById('cfg-nodes-layer').style.transform = `scale(${currentZoom})`;
-  document.getElementById('cfg-links-layer').style.transform = `scale(${currentZoom})`;
+
+/* Non-Blocking In-App Command Modal */
+let activeModalSubmit = null;
+function openActionModal(title, fieldsHtml, onSubmit) {
+  document.getElementById('modal-title').innerText = title;
+  document.getElementById('modal-fields').innerHTML = fieldsHtml;
+  activeModalSubmit = onSubmit;
+  document.getElementById('action-modal').classList.add('open');
+  const firstInput = document.querySelector('#modal-fields input');
+  if (firstInput) firstInput.focus();
+  document.getElementById('modal-submit-btn').onclick = () => {
+    if (activeModalSubmit) activeModalSubmit();
+    closeActionModal();
+  };
 }
-function resetGraphZoom() {
-  currentZoom = 1.0;
-  document.getElementById('cfg-nodes-layer').style.transform = `scale(1.0)`;
-  document.getElementById('cfg-links-layer').style.transform = `scale(1.0)`;
+function closeActionModal() {
+  document.getElementById('action-modal').classList.remove('open');
+  activeModalSubmit = null;
+}
+
+function openPathModal() {
+  openActionModal(
+    'Open Binary Path on Server',
+    `<div class="modal-field"><label>Server File Path (e.g. /bin/ls, /usr/bin/id):</label><input type="text" id="modal-path-in" value="${escHtml(appData.binaryPath || '/bin/ls')}"></div>`,
+    () => {
+      const p = document.getElementById('modal-path-in').value.trim();
+      if (p) loadBinaryFromServer(p);
+    }
+  );
+}
+
+function openJumpModal() {
+  openActionModal(
+    'Jump to Virtual Address or Function',
+    `<div class="modal-field"><label>Virtual Address (e.g. 0x4730):</label><input type="text" id="modal-jump-in" value="${escHtml(appData.activeFunctionVa || appData.entryPoint)}"></div>`,
+    () => {
+      const target = document.getElementById('modal-jump-in').value.trim();
+      if (target) selectAndDecompileFunction(target);
+    }
+  );
+}
+
+function openRenameModal() {
+  openActionModal(
+    'Rename Function / Symbol (N)',
+    `<div class="modal-field"><label>Target Address:</label><input type="text" id="modal-ren-addr" value="${escHtml(appData.activeFunctionVa || appData.entryPoint)}"></div>
+     <div class="modal-field"><label>New Symbol Name:</label><input type="text" id="modal-ren-name" value="${escHtml(appData.activeFunctionName || 'decrypt_packet')}"></div>`,
+    () => {
+      const addr = document.getElementById('modal-ren-addr').value.trim();
+      const val = document.getElementById('modal-ren-name').value.trim();
+      if (!addr || !val) return;
+      fetch('/api/annotate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ action: 'rename', address: addr, value: val, path: appData.binaryPath })
+      }).then(r => r.json()).then(d => {
+        if (d.status === 'ok') {
+          const fnEntry = appData.functions.find(f => String(f.addr).toLowerCase() === addr.toLowerCase());
+          if (fnEntry) fnEntry.name = val;
+          selectAndDecompileFunction(addr, val);
+        }
+      });
+    }
+  );
+}
+
+function openCommentModal() {
+  const curVa = document.getElementById('status-va').innerText || appData.activeFunctionVa;
+  openActionModal(
+    'Add Analyst Comment (;)',
+    `<div class="modal-field"><label>Instruction Address:</label><input type="text" id="modal-cmt-addr" value="${escHtml(curVa)}"></div>
+     <div class="modal-field"><label>Comment:</label><input type="text" id="modal-cmt-text" value="Verified bounds check"></div>`,
+    () => {
+      const addr = document.getElementById('modal-cmt-addr').value.trim();
+      const val = document.getElementById('modal-cmt-text').value.trim();
+      fetch('/api/annotate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ action: 'comment', address: addr, value: val, path: appData.binaryPath })
+      }).then(() => selectAndDecompileFunction(appData.activeFunctionVa, appData.activeFunctionName));
+    }
+  );
+}
+
+function openPatchModal() {
+  openActionModal(
+    'Live Binary Patcher',
+    `<div class="modal-field"><label>File Offset (Hex):</label><input type="text" id="modal-patch-off" value="0x40"></div>
+     <div class="modal-field"><label>Patch Operation:</label>
+       <select id="modal-patch-op">
+         <option value="nop">NOP Fill (0x90)</option>
+         <option value="invert">Invert Conditional Branch (JE ↔ JNE)</option>
+         <option value="ret0">Force Return 0 (xor eax, eax; ret)</option>
+         <option value="ret1">Force Return 1 (mov eax, 1; ret)</option>
+       </select>
+     </div>`,
+    async () => {
+      const path = appData.binaryPath || appData.currentBinaryPath;
+      if (!path) return;
+      const off = document.getElementById('modal-patch-off').value.trim();
+      const op = document.getElementById('modal-patch-op').value;
+      const r = await fetch(`/api/patch?path=${encodeURIComponent(path)}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ offset: off, operation: op })
+      });
+      const d = await r.json();
+      if (d.status === 'ok' && d.patched_path) {
+        logConsole('LIVE BINARY PATCH APPLIED', JSON.stringify(d.transaction, null, 2));
+        loadBinaryFromServer(d.patched_path);
+      }
+    }
+  );
 }
 
 function debuggerStep() {
   fetch('/api/debug?action=step').then(r => r.json()).then(d => {
     document.getElementById('status-va').innerText = d.snapshot.rip;
     document.getElementById('dbg-rip-badge').innerText = 'RIP: ' + d.snapshot.rip;
+    logConsole('DEBUGGER STEP (F7)', JSON.stringify(d.snapshot, null, 2));
   });
 }
 function debuggerContinue() {
   fetch('/api/debug?action=continue').then(r => r.json()).then(d => {
     document.getElementById('status-va').innerText = d.snapshot.rip;
     document.getElementById('dbg-rip-badge').innerText = 'RIP: ' + d.snapshot.rip;
+    logConsole('DEBUGGER CONTINUE (F9)', JSON.stringify(d.snapshot, null, 2));
   });
 }
 function debuggerToggleBP() {
@@ -824,73 +1499,44 @@ function debuggerToggleBP() {
   });
 }
 
-function promptRenameSymbol() {
-  const addr = prompt("Enter symbol address to rename:", appData.entryPoint);
-  if (!addr) return;
-  const newName = prompt("Enter new function name:", "decrypt_config_packet");
-  if (!newName) return;
-  fetch('/api/annotate', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ action: 'rename', address: addr, value: newName, path: appData.binaryPath })
-  }).then(r => r.json()).then(d => {
-    if (d.status === 'ok') {
-      if (appData.binaryPath) loadBinaryFromServer(appData.binaryPath);
-    }
-  });
-}
-
-function promptAddComment() {
-  const addr = prompt("Enter address for comment:", appData.entryPoint);
-  if (!addr) return;
-  const cmt = prompt("Enter analyst comment:", "Verified bounds check");
-  if (!cmt) return;
-  fetch('/api/annotate', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ action: 'comment', address: addr, value: cmt, path: appData.binaryPath })
-  });
-}
-
-async function runYaraGenerator() {
-  if (!appData.currentBinaryPath) return;
-  document.getElementById("smart-query-input").value = "yara";
-  await runSmartQuery();
-}
-
-async function runLayer2Bridge() {
-  if (!appData.currentBinaryPath) return;
-  document.getElementById("smart-query-input").value = "bridge";
-  await runSmartQuery();
-}
-
 async function runCPUEmulation() {
-  if (!appData.currentBinaryPath) return;
-  document.getElementById("smart-query-input").value = "emulate";
-  await runSmartQuery();
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  const r = await fetch(`/api/emulate?path=${encodeURIComponent(path)}`);
+  const d = await r.json();
+  logConsole('DETERMINISTIC CPU EMULATION', JSON.stringify(d.emulation || d, null, 2));
 }
 
-async function promptLivePatch() {
-  if (!appData.currentBinaryPath) return;
-  const off = prompt("Enter file offset to patch (e.g. 0x40):", "0x40");
-  if (!off) return;
-  const op = prompt("Patch operation (nop, invert, ret0, ret1):", "nop");
-  if (!op) return;
-  const r = await fetch(`/api/patch?path=${encodeURIComponent(appData.currentBinaryPath)}`, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({offset: off, operation: op})
-  });
+async function runForceExecVisor() {
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  const r = await fetch(`/api/force-exec?path=${encodeURIComponent(path)}`);
   const d = await r.json();
-  if (d.status === "ok" && d.patched_path) {
-    loadBinaryFromServer(d.patched_path);
-  }
+  logConsole('UNDER-CONSTRAINED MICRO-VISOR (MULTI-PATH FORCE EXECUTION)', JSON.stringify(d.visor_report || d, null, 2));
 }
 
 async function runVulnAudit() {
-  if (!appData.currentBinaryPath) return;
-  document.getElementById("smart-query-input").value = "vulnerabilities";
-  await runSmartQuery();
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  const r = await fetch(`/api/vulns?path=${encodeURIComponent(path)}`);
+  const d = await r.json();
+  logConsole(`CWE VULNERABILITY AUDIT (Rating: ${d.risk_rating || 'CLEAN'})`, JSON.stringify(d.vulnerabilities || d, null, 2));
+}
+
+async function runYaraGenerator() {
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  const r = await fetch(`/api/yara?path=${encodeURIComponent(path)}`);
+  const d = await r.json();
+  const yaraText = (d.detection_bundle && d.detection_bundle.yara_rule_source) || JSON.stringify(d, null, 2);
+  logConsole('GENERATED YARA & SIGMA DETECTION BUNDLE', yaraText);
+}
+
+async function execNativeRustCmd(cmd) {
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  const r = await fetch(`/api/native-rust?cmd=${encodeURIComponent(cmd)}&path=${encodeURIComponent(path)}`);
+  const d = await r.json();
+  logConsole(`NATIVE RUST ENGINE [reverse-forge-native ${cmd}]`, JSON.stringify(d, null, 2));
+}
+
+async function runNativeRustOmniAudit() {
+  await execNativeRustCmd('omni-audit');
 }
 
 function exportCHeader() {
@@ -898,23 +1544,21 @@ function exportCHeader() {
 }
 
 function runFullPipeline() {
-  if (!appData.binaryPath) {
-    alert("Upload or open a binary first to run the 12-stage audit pipeline.");
-    return;
-  }
-  switchView('pipe');
-  document.getElementById('pipeline-content').innerText = "Running 12-stage autonomous pipeline...";
-  fetch('/api/pipeline?path=' + encodeURIComponent(appData.binaryPath))
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  setStatus('RUNNING 12-STAGE PIPELINE...', 'var(--warning)');
+  fetch('/api/pipeline?path=' + encodeURIComponent(path))
     .then(r => r.json())
     .then(d => {
       if (d.status === 'ok') {
-        document.getElementById('pipeline-content').innerText = d.markdown_report;
+        logConsole('12-STAGE AUTONOMOUS AUDIT REPORT', d.markdown_report);
+        setStatus('12-STAGE PIPELINE COMPLETE', 'var(--success)');
       }
     });
 }
 
 function uploadBinaryFile(file) {
   if (!file) return;
+  setStatus(`UPLOADING ${file.name}...`, 'var(--warning)');
   const reader = new FileReader();
   reader.onload = function(evt) {
     fetch('/api/upload?filename=' + encodeURIComponent(file.name), {
@@ -941,91 +1585,119 @@ function handleDropFile(evt) {
 function runSmartQuery() {
   const q = document.getElementById('smart-query-input').value.trim();
   if (!q) return;
-  if (!appData.binaryPath) {
-    switchView('intel');
-    renderCapabilitiesAndIntel();
+  // Check if query matches a discovered function name or hex address
+  const fnMatch = appData.functions.find(f => f.name.toLowerCase() === q.toLowerCase() || String(f.addr).toLowerCase() === q.toLowerCase());
+  if (fnMatch) {
+    selectAndDecompileFunction(fnMatch.addr, fnMatch.name);
     return;
   }
-  fetch(`/api/query?path=${encodeURIComponent(appData.binaryPath)}&q=${encodeURIComponent(q)}`)
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  fetch(`/api/query?path=${encodeURIComponent(path)}&q=${encodeURIComponent(q)}`)
     .then(r => r.json())
     .then(data => {
       if (data.status === 'ok' && data.answer) {
-        switchView('intel');
+        switchBottomTab('intel');
         renderCapabilitiesAndIntel(data.answer.results);
+        logConsole(`SMART QUERY: "${q}" (${data.answer.intent_classified})`, data.answer.summary_answer);
       }
     });
 }
 
 function loadBinaryFromServer(path) {
+  setStatus(`INDEXING ${path}...`, 'var(--warning)');
   fetch('/api/analyze?path=' + encodeURIComponent(path))
     .then(r => r.json())
     .then(data => {
       if (data.status === 'ok') {
         const d = data.dossier;
         appData.binaryPath = d.artifact;
+        appData.currentBinaryPath = d.artifact;
         appData.format = d.format;
         appData.architecture = d.architecture;
         appData.entryPoint = d.entry_point;
-        document.getElementById('binary-format-badge').innerText = `${d.format} ${d.architecture}`;
+        appData.activeFunctionName = d.active_function_name || 'main';
+        appData.activeFunctionVa = d.active_function_va || d.entry_point;
+
+        document.getElementById('binary-format-badge').innerText = `${d.format} · ${d.architecture}`;
+        document.getElementById('active-func-badge').innerText = `${appData.activeFunctionName} @ ${appData.activeFunctionVa}`;
         document.getElementById('binary-name-label').innerText = `${d.artifact.split(/[\\/]/).pop()} (${(d.size_bytes / 1024).toFixed(1)} KB)`;
-        appData.sections = d.sections.map(s => ({
+
+        appData.sections = (d.sections || []).map(s => ({
           name: s.name || '.sec',
-          vaddr: s.virtual_address || '0x0',
-          vsize: s.virtual_size || s.raw_size || 0,
-          perms: s.executable ? 'R-X' : 'R--'
+          vaddr: s.virtual_address || s.address || '0x0',
+          vsize: s.virtual_size || s.raw_size || s.size || 0,
+          perms: s.executable ? 'R-X' : (s.writable ? 'RW-' : 'R--')
         }));
         appData.capabilities = d.capabilities || [];
         appData.xrefs = d.top_xrefs || [];
         appData.mitigations = d.mitigations || {};
-        appData.cfgBlocks = d.cfg_blocks || appData.cfgBlocks;
+        appData.cfgBlocks = d.cfg_blocks || [];
+        appData.disassemblyLines = d.disassembly_lines || [];
         appData.hexRows = d.hex_rows || [];
         appData.pseudocode = (d.unified_decompiled_c || d.structured_goto_free_c || d.decompiled_entry_c || '').split('\n');
+        appData.pcodeText = d.pcode_ssa_text || '';
+        appData.esilText = d.rizin_esil_text || '';
+        appData.vexText = d.angr_vex_text || '';
+
         const urls = (d.categorized_strings && d.categorized_strings.urls) || [];
+        const paths = (d.categorized_strings && d.categorized_strings.file_paths) || [];
         const gen = (d.categorized_strings && d.categorized_strings.general) || [];
-        appData.strings = [...urls, ...gen].slice(0, 50).map((s, i) => ({ value: s, addr: '0x' + (0x2000 + i * 16).toString(16) }));
-        appData.functions = [{ name: "entry_main", addr: d.entry_point, size: 128 }, ...appData.xrefs.filter(x => x.xref_type === 'CALL_REL32').map(x => ({ name: x.resolved_target_preview, addr: x.to_va, size: 64 }))];
+        appData.strings = [...urls, ...paths, ...gen].slice(0, 120).map((s, i) => ({ value: s, addr: '0x' + (0x1a000 + i * 16).toString(16) }));
+
+        if (d.discovered_functions && d.discovered_functions.length > 0) {
+          appData.functions = d.discovered_functions;
+        } else {
+          appData.functions = [{ name: "entry_main", addr: d.entry_point, size: 128, kind: "entry" }];
+        }
+
+        resetGraphZoom();
         renderAll();
+        setStatus(`INDEXED ${appData.functions.length} FUNCTIONS · ACTIVE: ${appData.activeFunctionName}`, 'var(--success)');
       } else {
-        alert('Error analyzing binary: ' + (data.error || 'Unknown'));
+        setStatus('ERROR: ' + (data.error || 'Failed to load binary'), 'var(--danger)');
       }
     });
-}
-
-function loadSampleBinary() {
-  const path = prompt("Enter server binary path to analyze:", appData.binaryPath || "/bin/ls");
-  if (path) loadBinaryFromServer(path);
 }
 
 function renderAll() {
   document.getElementById('funcs-count').innerText = appData.functions.length;
   document.getElementById('strings-count').innerText = appData.strings.length;
   renderSidebar();
+  renderLinearDisassembly();
   renderDecomp();
   renderHexView();
   renderCapabilitiesAndIntel();
-  renderXrefs();
   renderMitigationsHUD();
   renderCFGGraph();
 }
 
 window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'Escape') {
+    closeActionModal();
+    return;
+  }
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
+    if (e.key === 'Enter' && document.getElementById('action-modal').classList.contains('open')) {
+      document.getElementById('modal-submit-btn').click();
+    }
+    return;
+  }
   if (e.code === 'Space') {
     e.preventDefault();
-    const isCfg = document.getElementById('view-cfg').classList.contains('active');
-    switchView(isCfg ? 'hex' : 'cfg');
+    const isCfg = document.getElementById('subtab-cfg').classList.contains('active');
+    switchLeftPaneMode(isCfg ? 'disasm' : 'cfg');
   } else if (e.key === 'F5') {
     e.preventDefault();
-    switchView('decomp');
+    switchIrTab('c');
   } else if (e.key === 'g' || e.key === 'G') {
     e.preventDefault();
-    promptJump();
+    openJumpModal();
   } else if (e.key === 'n' || e.key === 'N') {
     e.preventDefault();
-    promptRenameSymbol();
+    openRenameModal();
   } else if (e.key === ';') {
     e.preventDefault();
-    promptAddComment();
+    openCommentModal();
   } else if (e.key === '/') {
     e.preventDefault();
     document.getElementById('filter-input').focus();
@@ -1054,7 +1726,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 
 class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
-    """Hardened, zero-dependency REST API & Web GUI server for R3V3R53//F0RG3."""
+    """Hardened, zero-dependency 4-Pane Synchronized REST API & Web GUI server for R3V3R53//F0RG3."""
 
     default_binary_path: Optional[str] = None
     project_db: ProjectWorkspaceDB = ProjectWorkspaceDB()
@@ -1184,9 +1856,51 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 "status": "ready",
                 "engine": "R3V3R53//F0RG3",
                 "version": "26.0.0-rust-bicentennial",
-                "active_engines": 87,
+                "active_engines": 118,
                 "default_binary": self.default_binary_path,
             })
+            return
+
+        elif path == "/api/function":
+            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            addr_s = query.get("addr", [""])[0]
+            if not bin_path or not os.path.exists(bin_path):
+                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+                return
+            try:
+                with open(bin_path, "rb") as f:
+                    data = f.read(8 * 1024 * 1024)
+                intel = BinaryIntelEngine(data, filepath=bin_path)
+                idx = WholeBinaryFunctionIndexer(data, intel.metadata)
+                target_va: Optional[int] = None
+                if addr_s:
+                    target_va = int(addr_s, 16) if addr_s.lower().startswith("0x") else int(addr_s, 10)
+                bundle = idx.analyze_function(
+                    target_va=target_va,
+                    custom_renames=self.project_db.symbol_renames,
+                    comments=self.project_db.comments,
+                )
+                self._json_response({"status": "ok", "function": asdict(bundle)})
+            except Exception as e:
+                self._json_response({"status": "error", "error": str(e)}, status=500)
+            return
+
+        elif path == "/api/native-rust":
+            cmd = query.get("cmd", ["doctor"])[0]
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            bin_exec = os.path.join(root, "rust_core", "bin", "reverse-forge-native")
+            if not os.path.isfile(bin_exec):
+                self._json_response({"status": "error", "error": "Native binary not compiled"}, status=404)
+                return
+            try:
+                out = subprocess.check_output([bin_exec, cmd], text=True, timeout=5).strip()
+                try:
+                    parsed_out = json.loads(out)
+                except Exception:
+                    parsed_out = {"raw_output": out}
+                self._json_response({"status": "ok", "command": cmd, "result": parsed_out})
+            except Exception as e:
+                self._json_response({"status": "error", "error": str(e)}, status=500)
             return
 
         elif path == "/api/pcap":
@@ -1555,7 +2269,6 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
     def _json_response(self, data: Dict[str, Any], status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        # SEC-03: Only emit Access-Control-Allow-Origin for verified localhost origins
         origin = self.headers.get("Origin", "")
         if origin and self._is_trusted_origin():
             self.send_header("Access-Control-Allow-Origin", origin)
@@ -1564,9 +2277,12 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
 
 
 def start_gui_workbench(port: int = 8080, open_browser: bool = True, binary_path: Optional[str] = None) -> None:
-    """Launch the local GUI workbench server."""
+    """Launch the local 4-Pane Synchronized GUI workbench server."""
     class ReusableServer(socketserver.TCPServer):
         allow_reuse_address = True
+
+    if binary_path is None and os.path.exists("/bin/ls"):
+        binary_path = "/bin/ls"
 
     GUIWorkbenchHandler.default_binary_path = binary_path
     try:
@@ -1580,8 +2296,8 @@ def start_gui_workbench(port: int = 8080, open_browser: bool = True, binary_path
         url += f"/?path={urllib.parse.quote(os.path.abspath(binary_path))}"
 
     print(f"\n  ╔════════════════════════════════════════════════════════════════════╗")
-    print(f"  ║   9R0JE6T R10T // R3V3R53-F0RG3  Interactive GUI Workbench v10.0  ║")
-    print(f"  ║   Hardened XSS/CORS · Drag-Drop Upload · Live 8-Pass Decompiler    ║")
+    print(f"  ║   9R0JE6T R10T // R3V3R53-F0RG3  4-Pane Synchronized Studio v27.0 ║")
+    print(f"  ║   Whole-Binary Indexer · Per-Function CFG/C/IR · 55 Rust Modules   ║")
     print(f"  ║   URL: {url:<54}║")
     print(f"  ╚════════════════════════════════════════════════════════════════════╝\n")
 

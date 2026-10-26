@@ -638,6 +638,10 @@ class BinaryIntelEngine:
         from reverse_forge.archive_container_triage_engine import ArchiveContainerTriageEngine
         arch_str = str(self.metadata.get("architecture", "x64"))
         uni_res = UnifiedDecompilerPipeline(arch=arch_str).decompile_function_bytes(code_slice, base_va=base_va)
+        from reverse_forge.whole_binary_function_indexer import WholeBinaryFunctionIndexer
+        wb_idx = WholeBinaryFunctionIndexer(self.binary_bytes, self.metadata)
+        discovered_funcs = [asdict(fn) for fn in wb_idx.discover_all_functions()]
+        primary_bundle = wb_idx.analyze_function()
         vuln_rep = BinaryVulnerabilityScannerEngine().scan_binary(
             self.binary_bytes,
             imported_symbols=self.metadata.get("imported_symbols", []),
@@ -682,9 +686,17 @@ class BinaryIntelEngine:
             "top_xrefs": [asdict(x) for x in xrefs],
             "decompiled_entry_c": dfunc.c_source,
             "structured_goto_free_c": structured.structured_c,
-            "unified_decompiled_c": uni_res.final_c_code,
-            "cfg_blocks": uni_res.cfg_blocks,
-            "hex_rows": hex_rows,
+            "unified_decompiled_c": primary_bundle.decompiled_c if (wb_idx.main_va is not None or len(discovered_funcs) > 2) else uni_res.final_c_code,
+            "pcode_ssa_text": primary_bundle.pcode_ssa_text,
+            "rizin_esil_text": primary_bundle.rizin_esil_text,
+            "angr_vex_text": primary_bundle.angr_vex_text,
+            "disassembly_lines": primary_bundle.disassembly_lines,
+            "discovered_functions_count": len(discovered_funcs),
+            "discovered_functions": discovered_funcs,
+            "active_function_name": primary_bundle.name,
+            "active_function_va": primary_bundle.addr,
+            "cfg_blocks": primary_bundle.cfg_blocks if primary_bundle.cfg_blocks else uni_res.cfg_blocks,
+            "hex_rows": primary_bundle.hex_rows if primary_bundle.hex_rows else hex_rows,
             "compiler_packer_profile": asdict(
                 __import__("reverse_forge.compiler_packer_profiler", fromlist=["CompilerPackerProfiler"])
                 .CompilerPackerProfiler()

@@ -163,11 +163,23 @@ class RecursiveDescentDisassembler:
         rex_w, rex_r, rex_x, rex_b = False, 0, 0, 0
         prefixes: List[str] = []
 
-        # 1. Strip legacy / VEX / EVEX / REX prefixes
+        seg_prefix = ""
+        # 1. Strip legacy / segment / LOCK / VEX / EVEX / REX prefixes
         while pos < n:
             b = code[pos]
             if b == 0x66:
                 prefixes.append("opsize16")
+                pos += 1
+            elif b == 0x64:
+                seg_prefix = "fs:"
+                prefixes.append("fs")
+                pos += 1
+            elif b == 0x65:
+                seg_prefix = "gs:"
+                prefixes.append("gs")
+                pos += 1
+            elif b in (0x2E, 0x3E, 0x26, 0x36, 0xF0):
+                prefixes.append("prefix")
                 pos += 1
             elif b in (0xF2, 0xF3):
                 if pos + 4 <= n and code[pos : pos + 4] == b"\xf3\x0f\x1e\xfa":
@@ -255,6 +267,27 @@ class RecursiveDescentDisassembler:
                 _, _, m_len = self._decode_modrm_ea(code, pos + 2, va, rex_w, rex_r, rex_x, rex_b)
                 sz = (pos - offset) + 2 + m_len
                 return DecodedInstruction(va, sz, "nop", "", code[offset : offset + sz].hex(), p_note)
+            if 0x40 <= op2 <= 0x4F and pos + 3 <= n:
+                r_name, rm_str, m_len = self._decode_modrm_ea(code, pos + 2, va, rex_w, rex_r, rex_x, rex_b)
+                sz = (pos - offset) + 2 + m_len
+                mn_cmov = "cmov" + self.JCC_MAP.get(op2 & 0x0F, "cc")[1:]
+                return DecodedInstruction(va, sz, mn_cmov, f"{r_name}, {rm_str}", code[offset : offset + sz].hex(), p_note)
+            if 0x90 <= op2 <= 0x9F and pos + 3 <= n:
+                _, rm_str, m_len = self._decode_modrm_ea(code, pos + 2, va, False, rex_r, rex_x, rex_b, byte_mode=True)
+                sz = (pos - offset) + 2 + m_len
+                mn_set = "set" + self.JCC_MAP.get(op2 & 0x0F, "cc")[1:]
+                return DecodedInstruction(va, sz, mn_set, rm_str, code[offset : offset + sz].hex(), p_note)
+            if op2 in (0x10, 0x11, 0x28, 0x29, 0x57, 0x6F, 0x7E, 0x7F, 0xD6, 0xEF) and pos + 3 <= n:
+                xmm_idx = ((code[pos + 2] >> 3) & 7) + (rex_r * 8)
+                _, rm_str, m_len = self._decode_modrm_ea(code, pos + 2, va, True, rex_r, rex_x, rex_b, ptr_prefix="xmmword ptr " if ((code[pos + 2] >> 6) & 3) != 3 else "")
+                sz = (pos - offset) + 2 + m_len
+                sse_mn = {
+                    0x10: "movups", 0x11: "movups", 0x28: "movaps", 0x29: "movaps",
+                    0x57: "xorps", 0x6F: "movdqa", 0x7E: "movd", 0x7F: "movdqa",
+                    0xD6: "movq", 0xEF: "pxor",
+                }[op2]
+                ops_sse = f"{rm_str}, xmm{xmm_idx}" if op2 in (0x11, 0x29, 0x7F, 0xD6) else f"xmm{xmm_idx}, {rm_str}"
+                return DecodedInstruction(va, sz, sse_mn, ops_sse, code[offset : offset + sz].hex(), p_note)
 
         # Relative CALL (E8 rel32) and JMP (E9 rel32 / EB rel8)
         if op == 0xE8 and pos + 5 <= n:
@@ -281,23 +314,104 @@ class RecursiveDescentDisassembler:
             mn = self.JCC_MAP.get(op & 0x0F, "jcc")
             return DecodedInstruction(va, sz, mn, hex(target), code[offset : offset + sz].hex(), p_note, is_branch=True, branch_target=target)
 
-        # Full ModR/M ALU, MOV, LEA, TEST (both register and memory operands!)
-        if op in (0x88, 0x89, 0x8A, 0x8B, 0x8D, 0x85, 0x01, 0x03, 0x29, 0x2B, 0x31, 0x33, 0x39, 0x3B) and pos + 2 <= n:
-            is_byte = op in (0x88, 0x8A)
-            p_pref = "" if op == 0x8D else ("byte ptr " if is_byte else ptr_hint)
+        # Push immediate (0x68 imm32 / 0x6A imm8)
+        if op == 0x68 and pos + 5 <= n:
+            imm32 = struct.unpack_from("<i", code, pos + 1)[0]
+            sz = (pos - offset) + 5
+            return DecodedInstruction(va, sz, "push", hex(imm32), code[offset : offset + sz].hex(), p_note)
+        if op == 0x6A and pos + 2 <= n:
+            imm8 = struct.unpack_from("<b", code, pos + 1)[0]
+            sz = (pos - offset) + 2
+            return DecodedInstruction(va, sz, "push", hex(imm8), code[offset : offset + sz].hex(), p_note)
+
+        # Accumulator immediate ALU (04/05 add, 0C/0D or, 24/25 and, 2C/2D sub, 34/35 xor, 3C/3D cmp, A8/A9 test)
+        if op in (0x04, 0x0C, 0x24, 0x2C, 0x34, 0x3C, 0xA8) and pos + 2 <= n:
+            imm8 = code[pos + 1]
+            sz = (pos - offset) + 2
+            mn_acc = {0x04: "add", 0x0C: "or", 0x24: "and", 0x2C: "sub", 0x34: "xor", 0x3C: "cmp", 0xA8: "test"}[op]
+            return DecodedInstruction(va, sz, mn_acc, f"al, {hex(imm8)}", code[offset : offset + sz].hex(), p_note)
+        if op in (0x05, 0x0D, 0x25, 0x2D, 0x35, 0x3D, 0xA9) and pos + 5 <= n:
+            imm32 = struct.unpack_from("<i", code, pos + 1)[0]
+            sz = (pos - offset) + 5
+            mn_acc = {0x05: "add", 0x0D: "or", 0x25: "and", 0x2D: "sub", 0x35: "xor", 0x3D: "cmp", 0xA9: "test"}[op]
+            acc_reg = "rax" if rex_w else "eax"
+            return DecodedInstruction(va, sz, mn_acc, f"{acc_reg}, {hex(imm32)}", code[offset : offset + sz].hex(), p_note)
+
+        # MOVSXD (0x63 r64, r/m32)
+        if op == 0x63 and pos + 2 <= n:
+            r_name, rm_str, m_len = self._decode_modrm_ea(code, pos + 1, va, True, rex_r, rex_x, rex_b, ptr_prefix="dword ptr " if ((code[pos + 1] >> 6) & 3) != 3 else "")
+            sz = (pos - offset) + 1 + m_len
+            return DecodedInstruction(va, sz, "movsxd", f"{r_name}, {rm_str}", code[offset : offset + sz].hex(), p_note)
+
+        # IMUL 3-operand (0x69 imm32 / 0x6B imm8)
+        if op in (0x69, 0x6B) and pos + 3 <= n:
+            r_name, rm_str, m_len = self._decode_modrm_ea(code, pos + 1, va, rex_w, rex_r, rex_x, rex_b)
+            imm_pos = pos + 1 + m_len
+            if op == 0x69 and imm_pos + 4 <= n:
+                imm_v = struct.unpack_from("<i", code, imm_pos)[0]
+                sz = (pos - offset) + 1 + m_len + 4
+                return DecodedInstruction(va, sz, "imul", f"{r_name}, {rm_str}, {hex(imm_v)}", code[offset : offset + sz].hex(), p_note)
+            if op == 0x6B and imm_pos + 1 <= n:
+                imm_v = struct.unpack_from("<b", code, imm_pos)[0]
+                sz = (pos - offset) + 1 + m_len + 1
+                return DecodedInstruction(va, sz, "imul", f"{r_name}, {rm_str}, {hex(imm_v)}", code[offset : offset + sz].hex(), p_note)
+
+        # Shifts & Rotates (C0/C1 imm8, D0/D1 1, D2/D3 cl)
+        if op in (0xC0, 0xC1, 0xD0, 0xD1, 0xD2, 0xD3) and pos + 2 <= n:
+            sub_sh = (code[pos + 1] >> 3) & 7
+            sh_map = {0: "rol", 1: "ror", 2: "rcl", 3: "rcr", 4: "shl", 5: "shr", 6: "sal", 7: "sar"}
+            _, rm_str, m_len = self._decode_modrm_ea(code, pos + 1, va, rex_w, rex_r, rex_x, rex_b, byte_mode=(op in (0xC0, 0xD0, 0xD2)))
+            if op in (0xC0, 0xC1) and pos + 1 + m_len + 1 <= n:
+                cnt = code[pos + 1 + m_len]
+                sz = (pos - offset) + 1 + m_len + 1
+                return DecodedInstruction(va, sz, sh_map[sub_sh], f"{rm_str}, {hex(cnt)}", code[offset : offset + sz].hex(), p_note)
+            sz = (pos - offset) + 1 + m_len
+            rhs = "1" if op in (0xD0, 0xD1) else "cl"
+            return DecodedInstruction(va, sz, sh_map[sub_sh], f"{rm_str}, {rhs}", code[offset : offset + sz].hex(), p_note)
+
+        # Unary & Test Group F6/F7 (test imm, not, neg, mul, imul, div, idiv)
+        if op in (0xF6, 0xF7) and pos + 2 <= n:
+            sub_f = (code[pos + 1] >> 3) & 7
+            _, rm_str, m_len = self._decode_modrm_ea(code, pos + 1, va, rex_w, rex_r, rex_x, rex_b, byte_mode=(op == 0xF6))
+            if sub_f in (0, 1):
+                imm_pos = pos + 1 + m_len
+                if op == 0xF6 and imm_pos + 1 <= n:
+                    imm_v = code[imm_pos]
+                    sz = (pos - offset) + 1 + m_len + 1
+                    return DecodedInstruction(va, sz, "test", f"{rm_str}, {hex(imm_v)}", code[offset : offset + sz].hex(), p_note)
+                if op == 0xF7 and imm_pos + 4 <= n:
+                    imm_v = struct.unpack_from("<i", code, imm_pos)[0]
+                    sz = (pos - offset) + 1 + m_len + 4
+                    return DecodedInstruction(va, sz, "test", f"{rm_str}, {hex(imm_v)}", code[offset : offset + sz].hex(), p_note)
+            else:
+                f_map = {2: "not", 3: "neg", 4: "mul", 5: "imul", 6: "div", 7: "idiv"}
+                sz = (pos - offset) + 1 + m_len
+                return DecodedInstruction(va, sz, f_map[sub_f], rm_str, code[offset : offset + sz].hex(), p_note)
+
+        # Full ModR/M ALU, MOV, LEA, TEST, XCHG (both register and memory operands!)
+        if op in (
+            0x00, 0x01, 0x02, 0x03, 0x08, 0x09, 0x0A, 0x0B,
+            0x20, 0x21, 0x22, 0x23, 0x28, 0x29, 0x2A, 0x2B,
+            0x30, 0x31, 0x32, 0x33, 0x38, 0x39, 0x3A, 0x3B,
+            0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8D
+        ) and pos + 2 <= n:
+            is_byte = op in (0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A, 0x30, 0x32, 0x38, 0x3A, 0x84, 0x86, 0x88, 0x8A)
+            p_pref = "" if op == 0x8D else (("byte ptr " if is_byte else ptr_hint) + seg_prefix)
             r_name, rm_str, m_len = self._decode_modrm_ea(
                 code, pos + 1, va, rex_w, rex_r, rex_x, rex_b, byte_mode=is_byte, ptr_prefix=p_pref
             )
             mn_map = {
                 0x88: "mov", 0x89: "mov", 0x8A: "mov", 0x8B: "mov",
-                0x8D: "lea", 0x85: "test",
-                0x01: "add", 0x03: "add",
-                0x29: "sub", 0x2B: "sub",
-                0x31: "xor", 0x33: "xor",
-                0x39: "cmp", 0x3B: "cmp",
+                0x8D: "lea", 0x84: "test", 0x85: "test", 0x86: "xchg", 0x87: "xchg",
+                0x00: "add", 0x01: "add", 0x02: "add", 0x03: "add",
+                0x08: "or",  0x09: "or",  0x0A: "or",  0x0B: "or",
+                0x20: "and", 0x21: "and", 0x22: "and", 0x23: "and",
+                0x28: "sub", 0x29: "sub", 0x2A: "sub", 0x2B: "sub",
+                0x30: "xor", 0x31: "xor", 0x32: "xor", 0x33: "xor",
+                0x38: "cmp", 0x39: "cmp", 0x3A: "cmp", 0x3B: "cmp",
             }
             mn = mn_map[op]
-            reg_is_dst = op in (0x8A, 0x8B, 0x8D, 0x03, 0x2B, 0x33, 0x3B)
+            reg_is_dst = op in (0x02, 0x03, 0x0A, 0x0B, 0x22, 0x23, 0x2A, 0x2B, 0x32, 0x33, 0x3A, 0x3B, 0x8A, 0x8B, 0x8D)
             ops_s = f"{r_name}, {rm_str}" if reg_is_dst else f"{rm_str}, {r_name}"
             sz = (pos - offset) + 1 + m_len
             return DecodedInstruction(va, sz, mn, ops_s, code[offset : offset + sz].hex(), p_note)
