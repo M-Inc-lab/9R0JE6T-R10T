@@ -376,6 +376,72 @@ class WholeBinaryFunctionIndexer:
             return self.symtab_symbols[va]
         return None
 
+
+    @staticmethod
+    def _asm_op_to_c_expr(op_str: str, is_addr_lea: bool = False) -> str:
+        s = op_str.strip()
+        if not s:
+            return "0"
+        # Convert `[rsp + 0x40]` or `dword ptr [rsp + 0x8]` to stack local variable
+        m_rsp = re.search(r"\[rsp(?:\s*\+\s*(0x[0-9a-fA-F]+|\d+))?\]", s)
+        if m_rsp:
+            off_s = (m_rsp.group(1) or "0").replace("0x", "")
+            var_name = f"local_{off_s}"
+            return f"&{var_name}" if is_addr_lea else var_name
+
+        # Convert `(qword|dword|word|byte) ptr [base + off]` to typed C pointer dereference
+        m_ptr = re.match(r"^(qword|dword|word|byte|xmmword)\s+ptr\s+\[(.*)\]$", s)
+        if m_ptr:
+            width_kw, inner = m_ptr.group(1), m_ptr.group(2).strip()
+            c_ty = {
+                "qword": "uint64_t",
+                "dword": "uint32_t",
+                "word": "uint16_t",
+                "byte": "uint8_t",
+                "xmmword": "__uint128_t",
+            }.get(width_kw, "uint64_t")
+            if inner == "rsi":
+                return "argv[0]"
+            if inner.startswith("rip"):
+                return f"g_data_{abs(hash(inner)) & 0xffff:x}"
+            return f"*({c_ty}*)({inner})"
+
+        # Bare `[base + off]`
+        if s.startswith("[") and s.endswith("]"):
+            inner = s[1:-1].strip()
+            if is_addr_lea:
+                return f"({inner})"
+            return f"*(uint64_t*)({inner})"
+
+        return s
+
+    @staticmethod
+    def _jcc_to_c_condition(mnem: str, lhs: str, rhs: str, is_zero_test: bool = False) -> str:
+        if is_zero_test:
+            if mnem in ("je", "jz"):
+                return f"!{lhs}"
+            if mnem in ("jne", "jnz"):
+                return f"{lhs} != 0"
+            if mnem == "js":
+                return f"(int64_t){lhs} < 0"
+            if mnem == "jns":
+                return f"(int64_t){lhs} >= 0"
+        op_map = {
+            "je": "==", "jz": "==",
+            "jne": "!=", "jnz": "!=",
+            "ja": ">", "jnbe": ">",
+            "jae": ">=", "jnb": ">=", "jnc": ">=",
+            "jb": "<", "jnae": "<", "jc": "<",
+            "jbe": "<=", "jna": "<=",
+            "jg": ">", "jnle": ">",
+            "jge": ">=", "jnl": ">=",
+            "jl": "<", "jnge": "<",
+            "jle": "<=", "jng": "<=",
+            "js": "<", "jns": ">=",
+        }
+        c_op = op_map.get(mnem, "==")
+        return f"{lhs} {c_op} {rhs}"
+
     def analyze_function(
         self,
         target_va: Optional[int] = None,
@@ -404,15 +470,26 @@ class WholeBinaryFunctionIndexer:
         disassembly_lines: List[Dict[str, Any]] = []
         called_functions: List[str] = []
         referenced_strings: List[Dict[str, str]] = []
-        reg_state: Dict[str, str] = {}
+        reg_state: Dict[str, str] = (
+            {"rdi": "argc", "edi": "argc", "rsi": "argv", "rdx": "envp"}
+            if func_name == "main"
+            else {"rdi": "arg1", "edi": "arg1", "rsi": "arg2", "esi": "arg2", "rdx": "arg3", "edx": "arg3"}
+        )
         c_statements: List[Tuple[int, str]] = []
         pcode_lines: List[str] = []
         esil_lines: List[str] = []
         vex_lines: List[str] = [f"IRSB {{ addr={hex(target_va)}, arch=\"{self.arch}\" }}"]
 
         rip_disp_re = re.compile(r"\[rip\s*([+-])\s*(0x[0-9a-fA-F]+|\d+)\]")
+        branch_targets = {
+            ins.branch_target
+            for ins in sorted_insns
+            if ins.is_branch and not ins.is_call and ins.branch_target is not None
+        }
 
         for ins in sorted_insns:
+            if ins.address in branch_targets and ins.address != target_va:
+                c_statements.append((ins.address, f"loc_{ins.address:x}:"))
             next_ip = ins.address + ins.size
             ops_display = ins.op_str
             inline_comment = (comments or {}).get(hex(ins.address), "")
@@ -500,11 +577,13 @@ class WholeBinaryFunctionIndexer:
                         if dst.startswith("dword ptr") or dst.startswith("qword ptr") or dst.startswith("byte ptr"):
                             c_statements.append((ins.address, f"g_data_{rip_target_va:x} = {src};"))
                 else:
-                    resolved_src = reg_state.get(src, src)
+                    c_src = self._asm_op_to_c_expr(src, is_addr_lea=(mn == "lea"))
+                    resolved_src = reg_state.get(src, c_src)
                     reg_state[abi_norm] = resolved_src
                     reg_state[dst] = resolved_src
                     if dst.startswith(("qword ptr", "dword ptr", "byte ptr")) and "rsp" not in dst:
-                        c_statements.append((ins.address, f"*{dst.split('ptr')[-1].strip()} = {resolved_src};"))
+                        c_dst = self._asm_op_to_c_expr(dst)
+                        c_statements.append((ins.address, f"{c_dst} = {resolved_src};"))
 
                 pcode_lines.append(f"{hex(ins.address)}: {dst} = COPY {src}")
                 esil_lines.append(f"{hex(ins.address)}: {src},{dst},=")
@@ -518,15 +597,24 @@ class WholeBinaryFunctionIndexer:
                 esil_lines.append(f"{hex(ins.address)}: 0,{parts[0]},=,$z,zf,=")
 
             elif mn in ("add", "sub", "and", "or", "xor", "shl", "shr") and len(parts) == 2 and parts[0] != "rsp":
-                dst, rhs = parts[0], parts[1]
+                dst = self._asm_op_to_c_expr(parts[0])
+                rhs = self._asm_op_to_c_expr(parts[1])
                 op_sym = {"add": "+", "sub": "-", "and": "&", "or": "|", "xor": "^", "shl": "<<", "shr": ">>"}[mn]
-                c_statements.append((ins.address, f"{dst} {op_sym}= {reg_state.get(rhs, rhs)};"))
+                c_statements.append((ins.address, f"{dst} {op_sym}= {reg_state.get(parts[1], rhs)};"))
                 pcode_lines.append(f"{hex(ins.address)}: {dst} = INT_{mn.upper()} {dst}, {rhs}")
                 esil_lines.append(f"{hex(ins.address)}: {rhs},{dst},{op_sym}=")
 
             elif mn in ("cmp", "test") and len(parts) == 2:
-                lhs, rhs = reg_state.get(parts[0], parts[0]), reg_state.get(parts[1], parts[1])
-                reg_state["__last_cond"] = f"{lhs} == 0" if (mn == "test" and parts[0] == parts[1]) else f"{lhs} vs {rhs}"
+                raw_l = self._asm_op_to_c_expr(parts[0])
+                raw_r = self._asm_op_to_c_expr(parts[1])
+                lhs = reg_state.get(parts[0], raw_l)
+                rhs = reg_state.get(parts[1], raw_r)
+                if rip_target_va is not None and "rip" in parts[0]:
+                    lhs = f"g_data_{rip_target_va:x}"
+                is_zt = (mn == "test" and parts[0] == parts[1])
+                reg_state["__cond_lhs"] = lhs
+                reg_state["__cond_rhs"] = "0" if is_zt else rhs
+                reg_state["__cond_zt"] = "1" if is_zt else "0"
                 pcode_lines.append(f"{hex(ins.address)}: tmp_zf = INT_EQUAL {lhs}, {rhs}")
                 esil_lines.append(f"{hex(ins.address)}: {rhs},{lhs},==,$z,zf,=")
 
@@ -563,11 +651,17 @@ class WholeBinaryFunctionIndexer:
                 vex_lines.append(f"   ------ IMark({hex(ins.address)}, {ins.size}) ------\n   CALL {callee_clean}({args_str})")
 
             elif ins.is_branch and not ins.is_call:
-                cond_s = reg_state.get("__last_cond", "cond_flags")
+                c_lhs = reg_state.get("__cond_lhs", "status")
+                c_rhs = reg_state.get("__cond_rhs", "0")
+                c_zt = reg_state.get("__cond_zt", "0") == "1"
                 if mn == "jmp":
-                    c_statements.append((ins.address, f"goto loc_{ins.branch_target:x};" if ins.branch_target else "return rax;"))
+                    if ins.branch_target:
+                        c_statements.append((ins.address, f"goto loc_{ins.branch_target:x};"))
+                    else:
+                        c_statements.append((ins.address, f"/* indirect dispatch: jmp {ins.op_str} */ break;"))
                 else:
-                    c_statements.append((ins.address, f"if ({mn}({cond_s})) goto loc_{ins.branch_target or 0:x};"))
+                    cond_expr = self._jcc_to_c_condition(mn, c_lhs, c_rhs, is_zero_test=c_zt)
+                    c_statements.append((ins.address, f"if ({cond_expr}) goto loc_{ins.branch_target or 0:x};"))
                 pcode_lines.append(f"{hex(ins.address)}: CBRANCH {ops_display}, tmp_zf")
                 esil_lines.append(f"{hex(ins.address)}: zf,?{{,{ops_display},rip,=,}}")
 
@@ -591,10 +685,10 @@ class WholeBinaryFunctionIndexer:
             f"// Function: {func_name} @ {hex(target_va)} ({len(sorted_insns)} instructions, {len(cfg_blocks)} CFG blocks)",
             f"{proto} {{",
         ]
-        if func_name == "main":
-            c_lines.append("    int64_t rax = 0;")
+        c_lines.append("    int64_t rax = 0;")
         for stmt_va, stmt_code in c_statements:
-            c_lines.append(f"    {stmt_code:<56} // @ {hex(stmt_va)}")
+            indent = "" if stmt_code.startswith("loc_") else "    "
+            c_lines.append(f"{indent}{stmt_code:<56} // @ {hex(stmt_va)}")
         if not any(s.startswith("return ") for _, s in c_statements):
             c_lines.append("    return rax;")
         c_lines.append("}")
