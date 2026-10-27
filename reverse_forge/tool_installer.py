@@ -93,7 +93,19 @@ class ToolchainInstaller:
         return {"available": False, "path": None, "type": None}
 
     def _find_ghidra(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
-        sys_path = shutil.which("analyzeHeadless") or shutil.which("ghidra")
+        sys_path = shutil.which("analyzeHeadless")
+        if not sys_path and shutil.which("ghidra"):
+            g_path = os.path.realpath(shutil.which("ghidra"))
+            candidate = os.path.join(os.path.dirname(g_path), "support", "analyzeHeadless")
+            if os.path.exists(candidate):
+                sys_path = candidate
+            elif os.path.exists("/usr/share/ghidra/support/analyzeHeadless"):
+                sys_path = "/usr/share/ghidra/support/analyzeHeadless"
+            else:
+                sys_path = shutil.which("ghidra")
+        elif not sys_path and os.path.exists("/usr/share/ghidra/support/analyzeHeadless"):
+            sys_path = "/usr/share/ghidra/support/analyzeHeadless"
+
         if sys_path:
             return {"available": True, "path": sys_path, "type": "system"}
 

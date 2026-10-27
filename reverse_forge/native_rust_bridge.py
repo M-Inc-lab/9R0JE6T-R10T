@@ -64,13 +64,14 @@ class NativeRustAccelerator:
     _lib: Optional[ctypes.CDLL] = None
     _compiler_used: str = "pure-python-fallback"
     _current_backend: BackendExecutionMode = BackendExecutionMode.PURE_PYTHON
+    _forced_backend: Optional[BackendExecutionMode] = None
     _last_build_diagnostics: List[str] = []
     _compile_lock = threading.Lock()
 
     @classmethod
     def get_active_backend(cls) -> BackendExecutionMode:
         """Explicitly returns the current active execution backend."""
-        cls.ensure_compiled()
+        cls.ensure_compiled(force_backend=cls._forced_backend)
         return cls._current_backend
 
     @classmethod
@@ -115,6 +116,15 @@ class NativeRustAccelerator:
         Thread-safe native library compilation and loader with cache fingerprint validation.
         """
         with cls._compile_lock:
+            if force_backend is not None:
+                cls._forced_backend = force_backend
+
+            if force_backend == BackendExecutionMode.PURE_PYTHON:
+                cls._lib = None
+                cls._compiler_used = "pure-python-reference"
+                cls._current_backend = BackendExecutionMode.PURE_PYTHON
+                return None
+
             if cls._lib is not None and force_backend is None:
                 return cls._lib
 
@@ -147,8 +157,11 @@ class NativeRustAccelerator:
                             cls._lib = lib
                             cls._compiler_used = "rustc-cargo-release-lto"
                             cls._current_backend = BackendExecutionMode.RUST_NATIVE
-                            # Copy to cache
-                            shutil.copy2(rust_target_so, os.path.join(cache_dir, f"libreverse_forge_{fingerprint[:12]}{ext}"))
+                            # Atomic copy to cache
+                            cached_rust_so = os.path.join(cache_dir, f"libreverse_forge_{fingerprint[:12]}{ext}")
+                            tmp_rust = cached_rust_so + f".tmp_{os.getpid()}"
+                            shutil.copy2(rust_target_so, tmp_rust)
+                            os.replace(tmp_rust, cached_rust_so)
                             return cls._lib
                     else:
                         diag = f"Cargo build failed (code {proc.returncode}): {proc.stderr[:300]}"
@@ -165,9 +178,11 @@ class NativeRustAccelerator:
                     cc = shutil.which("gcc") or shutil.which("clang") or shutil.which("cc")
                     if cc:
                         try:
-                            cmd = [cc, "-O3", "-shared", "-fPIC", c_src, "-o", cached_c_so, "-lm"]
+                            tmp_c_so = cached_c_so + f".tmp_{os.getpid()}"
+                            cmd = [cc, "-O3", "-shared", "-fPIC", c_src, "-o", tmp_c_so, "-lm"]
                             c_proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False)
-                            if c_proc.returncode == 0 and os.path.exists(cached_c_so):
+                            if c_proc.returncode == 0 and os.path.exists(tmp_c_so):
+                                os.replace(tmp_c_so, cached_c_so)
                                 lib = cls._bind_signatures(ctypes.CDLL(cached_c_so))
                                 if cls._validate_abi(lib):
                                     cls._lib = lib
@@ -175,18 +190,25 @@ class NativeRustAccelerator:
                                     cls._current_backend = BackendExecutionMode.C_FALLBACK
                                     return cls._lib
                             else:
+                                if os.path.exists(tmp_c_so):
+                                    os.remove(tmp_c_so)
                                 cls._last_build_diagnostics.append(f"C fallback compilation failed: {c_proc.stderr[:300]}")
                         except Exception as c_exc:
                             cls._last_build_diagnostics.append(f"C compiler exception: {c_exc}")
 
             # 3. Try pre-compiled repo binary if present
-            if os.path.exists(bin_so):
+            if os.path.exists(bin_so) and force_backend is None:
                 try:
                     lib = cls._bind_signatures(ctypes.CDLL(bin_so))
                     if cls._validate_abi(lib):
                         cls._lib = lib
+                        # Detect backend identity from symbol if available
+                        if hasattr(lib, "rf_native_backend_identity"):
+                            ident = lib.rf_native_backend_identity().decode("utf-8")
+                            cls._current_backend = BackendExecutionMode.RUST_NATIVE if "RUST" in ident else BackendExecutionMode.C_FALLBACK
+                        else:
+                            cls._current_backend = BackendExecutionMode.C_FALLBACK
                         cls._compiler_used = "precompiled-native-binary"
-                        cls._current_backend = BackendExecutionMode.C_FALLBACK
                         return cls._lib
                 except Exception as exc:
                     cls._last_build_diagnostics.append(f"Failed to load precompiled binary: {exc}")
@@ -198,7 +220,19 @@ class NativeRustAccelerator:
 
     @staticmethod
     def _validate_abi(lib: ctypes.CDLL) -> bool:
-        """Strict ABI validation on load using known test vectors (§06, Stage 5)."""
+        """Strict ABI validation on load using required symbols and test vectors (§06, Phase E)."""
+        required_symbols = (
+            "rf_rust_entropy",
+            "rf_rust_flirt_crc16",
+            "rf_rust_fnv1a_64",
+            "rf_rust_visor_exec",
+            "rf_rust_pcode_decompile",
+        )
+        for sym in required_symbols:
+            if not hasattr(lib, sym):
+                logger.error("ABI validation failure: Missing required symbol '%s'", sym)
+                return False
+
         try:
             # Vector 1: Standard FLIRT CRC-16 of '123456789' must equal 0x906E
             vec = b"123456789"
@@ -212,6 +246,11 @@ class NativeRustAccelerator:
             if abs(ent - 0.0) > 1e-6:
                 return False
 
+            # Vector 3: FNV1a-64 of b"test" must equal 0xf9e6e6ef197c2b25
+            fnv_res = lib.rf_rust_fnv1a_64(b"test", 4)
+            if fnv_res != 0xf9e6e6ef197c2b25:
+                return False
+
             return True
         except Exception as err:
             logger.error("ABI validation exception: %s", err)
@@ -219,6 +258,10 @@ class NativeRustAccelerator:
 
     @staticmethod
     def _bind_signatures(lib: ctypes.CDLL) -> ctypes.CDLL:
+        if hasattr(lib, "rf_native_backend_identity"):
+            lib.rf_native_backend_identity.argtypes = []
+            lib.rf_native_backend_identity.restype = ctypes.c_char_p
+
         lib.rf_rust_entropy.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
         lib.rf_rust_entropy.restype = ctypes.c_double
 

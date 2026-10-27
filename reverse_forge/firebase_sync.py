@@ -49,10 +49,10 @@ class AuthUserContext:
     is_verified: bool = False
 
     def can_modify(self) -> bool:
-        return self.role in (UserRole.ANALYST, UserRole.LEAD_ARCHITECT)
+        return self.is_verified and self.role in (UserRole.ANALYST, UserRole.LEAD_ARCHITECT)
 
     def is_lead(self) -> bool:
-        return self.role == UserRole.LEAD_ARCHITECT
+        return self.is_verified and self.role == UserRole.LEAD_ARCHITECT
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -124,7 +124,7 @@ class FirestoreJobDocument:
 class FirebaseAuthManager:
     """
     Handles identity-provider cryptographic token validation, JWT decoding,
-    and RBAC authorization with fail-closed security (§03.1, Stage 2).
+    revocation checking, and RBAC authorization with fail-closed security (§03.1, Phase B).
     """
 
     def __init__(
@@ -135,6 +135,7 @@ class FirebaseAuthManager:
         verification_key: Optional[str] = None,
         allowed_algorithms: Optional[List[str]] = None,
         allow_dev_mock: bool = False,
+        trusted_tenants: Optional[Set[str]] = None,
     ):
         self.project_id = project_id or os.environ.get("FIREBASE_PROJECT_ID", "reverse-forge-local")
         self.expected_issuer = expected_issuer or os.environ.get(
@@ -145,6 +146,12 @@ class FirebaseAuthManager:
         )
         self.verification_key = verification_key or os.environ.get("FIREBASE_JWT_VERIFICATION_KEY")
         self.allowed_algorithms = allowed_algorithms or ["RS256", "ES256", "HS256"]
+        self.allow_dev_mock = allow_dev_mock
+        self.trusted_tenants = trusted_tenants
+
+        # Revocation denylists for active sessions / compromised tokens
+        self.revoked_tokens: Set[str] = set()
+        self.revoked_users: Set[str] = set()
 
         env_mode = os.environ.get("REVERSE_FORGE_ENV", "").lower()
         self.is_production = env_mode == "production"
@@ -154,24 +161,31 @@ class FirebaseAuthManager:
             logger.error("PRODUCTION CONFIGURATION ERROR: No trusted key or service account configured in production mode!")
             self.mock_mode = False
         else:
-            # Mock mode permitted ONLY in development when explicitly allowed
             self.mock_mode = (not has_key) and (allow_dev_mock or (not self.is_production))
+
+    def revoke_token(self, token_or_jti: str) -> None:
+        """Add a token signature/jti to the revocation denylist."""
+        self.revoked_tokens.add(token_or_jti)
+
+    def revoke_user(self, uid: str) -> None:
+        """Revoke all sessions for a specific user ID."""
+        self.revoked_users.add(uid)
 
     def verify_bearer_token(self, auth_header: Optional[str]) -> Optional[AuthUserContext]:
         """
         Verify the HTTP Authorization: Bearer <token> header.
         Enforces cryptographic signature verification, expiration, audience/issuer
-        checks, and strict fail-closed security.
+        checks, revocation checks, and strict fail-closed security.
         """
         # 1. Missing Authorization Header handling
         if not auth_header:
-            if self.is_production or not self.mock_mode:
+            if self.is_production or not self.allow_dev_mock:
                 return None
-            # Dev mock fallback: allowed only in local non-production environment
+            # Dev mock fallback: allowed only when explicitly opted-in
             return AuthUserContext(
                 uid="dev_local_user",
                 email="architect@reverse-forge.local",
-                role=UserRole.LEAD_ARCHITECT,
+                role=UserRole.VIEWER,
                 tenant_id="local_lab",
                 is_verified=False,
             )
@@ -182,95 +196,100 @@ class FirebaseAuthManager:
 
         token = parts[1]
 
-        # 2. Strict format inspection: must be 3-part signed JWT
+        # 2. Mock token check (must strictly start with mock-token- or dev-token-)
+        if token.startswith("mock-token-") or token.startswith("dev-token-"):
+            if self.is_production:
+                logger.error("SECURITY ALERT: Mock token presented in production environment!")
+                return None
+            if not self.allow_dev_mock:
+                logger.warning("Mock token rejected: allow_dev_mock is disabled")
+                return None
+            return AuthUserContext(
+                uid=token,
+                email="dev@reverse-forge.local",
+                role=UserRole.VIEWER,
+                tenant_id="local_lab",
+                is_verified=False,
+            )
+
+        # 3. Real JWT format inspection: must be 3-part signed JWT
         jwt_parts = token.split(".")
         if len(jwt_parts) != 3 or not jwt_parts[0] or not jwt_parts[1]:
             logger.warning("Rejecting malformed token structure (expected 3 parts)")
             return None
 
-        # 3. Check header algorithm: never allow 'none'
+        # 4. Check header algorithm: never allow 'none'
         try:
             hdr_raw = jwt_parts[0] + "=" * ((4 - len(jwt_parts[0]) % 4) % 4)
             hdr = json.loads(base64.urlsafe_b64decode(hdr_raw).decode("utf-8"))
             alg = hdr.get("alg", "").upper()
-            if alg == "NONE" or not alg:
-                logger.warning("Rejecting insecure token with alg='none'")
+            if alg == "NONE" or not alg or alg not in self.allowed_algorithms:
+                logger.warning("Rejecting insecure or unsupported algorithm: %s", alg)
                 return None
         except Exception as e:
             logger.warning("Failed to decode token header: %s", e)
             return None
 
-        # 4. Cryptographic Signature Verification
-        claims: Dict[str, Any] = {}
-        is_verified = False
+        # 5. Cryptographic Signature Verification
+        if not self.verification_key or jwt is None:
+            logger.warning("Production/secure token rejected: No trusted verification key available to verify signature")
+            return None
 
-        if self.verification_key and jwt:
-            try:
-                claims = jwt.decode(
-                    token,
-                    self.verification_key,
-                    algorithms=self.allowed_algorithms,
-                    audience=self.expected_audience,
-                    issuer=self.expected_issuer if self.expected_issuer != f"https://securetoken.google.com/{self.project_id}" else None,
-                    options={"require": ["exp", "sub"]},
-                )
-                is_verified = True
-            except jwt.ExpiredSignatureError:
-                logger.warning("Token verification failed: expired token")
-                return None
-            except jwt.InvalidTokenError as err:
-                logger.warning("Token verification failed: %s", err)
-                return None
-        else:
-            # In production, signature verification key is mandatory
-            if self.is_production:
-                logger.warning("Production token rejected: No trusted verification key available to verify signature")
-                return None
+        try:
+            claims = jwt.decode(
+                token,
+                self.verification_key,
+                algorithms=self.allowed_algorithms,
+                audience=self.expected_audience,
+                issuer=self.expected_issuer,
+                options={
+                    "require": ["exp", "sub", "iss", "aud"],
+                    "verify_exp": True,
+                    "verify_nbf": True,
+                    "verify_iss": True,
+                    "verify_aud": True,
+                },
+            )
+        except jwt.ExpiredSignatureError:
+            logger.warning("Token verification failed: expired token")
+            return None
+        except jwt.ImmatureSignatureError:
+            logger.warning("Token verification failed: token used before nbf")
+            return None
+        except jwt.InvalidIssuerError:
+            logger.warning("Token verification failed: issuer mismatch")
+            return None
+        except jwt.InvalidAudienceError:
+            logger.warning("Token verification failed: audience mismatch")
+            return None
+        except (jwt.InvalidTokenError, jwt.MissingRequiredClaimError) as err:
+            logger.warning("Token verification failed: %s", err)
+            return None
 
-            # In development/test mode without a static key: decode payload and validate standard claims
-            try:
-                padded_payload = jwt_parts[1] + "=" * ((4 - len(jwt_parts[1]) % 4) % 4)
-                payload_json = base64.urlsafe_b64decode(padded_payload).decode("utf-8")
-                claims = json.loads(payload_json)
+        # 6. Revocation checks
+        jti = claims.get("jti", "")
+        uid = claims.get("sub", "")
+        if token in self.revoked_tokens or (jti and jti in self.revoked_tokens) or (uid and uid in self.revoked_users):
+            logger.warning("Token verification failed: token or user is revoked")
+            return None
 
-                now = time.time()
-                # Expiration check
-                if "exp" in claims and isinstance(claims["exp"], (int, float)):
-                    if now > claims["exp"]:
-                        logger.warning("Rejecting expired token (exp=%s, now=%s)", claims["exp"], now)
-                        return None
+        # 7. Tenant validation against trusted policy
+        tenant_id = claims.get("tenant_id", "default_tenant")
+        if self.trusted_tenants is not None and tenant_id not in self.trusted_tenants:
+            logger.warning("Token verification failed: unauthorized or fabricated tenant_id '%s'", tenant_id)
+            return None
 
-                # Not-before check
-                if "nbf" in claims and isinstance(claims["nbf"], (int, float)):
-                    if now < claims["nbf"]:
-                        logger.warning("Rejecting token not yet active (nbf=%s, now=%s)", claims["nbf"], now)
-                        return None
-
-                # Issuer check
-                if self.expected_issuer and claims.get("iss") and claims.get("iss") != self.expected_issuer:
-                    logger.warning("Rejecting token with mismatched issuer: %s", claims.get("iss"))
-                    return None
-
-                # Audience check
-                if self.expected_audience and claims.get("aud") and claims.get("aud") != self.expected_audience:
-                    logger.warning("Rejecting token with mismatched audience: %s", claims.get("aud"))
-                    return None
-
-            except Exception as exc:
-                logger.warning("Payload extraction failed: %s", exc)
-                return None
-
-        # 5. Safe Role & Identity Resolution
+        # 8. Safe Role & Identity Resolution
         role_str = claims.get("role", "ANALYST").upper()
         role = getattr(UserRole, role_str, UserRole.ANALYST)
 
         return AuthUserContext(
-            uid=claims.get("sub", claims.get("user_id", "anonymous")),
+            uid=uid,
             email=claims.get("email", "operator@reverse-forge.cloud"),
             role=role,
-            tenant_id=claims.get("tenant_id", "default_tenant"),
+            tenant_id=tenant_id,
             token_claims=claims,
-            is_verified=is_verified,
+            is_verified=True,
         )
 
 
@@ -387,7 +406,7 @@ class LocalSimulationPersistenceAdapter(PersistenceBackend):
             if tenant_id not in self._tenant_blobs:
                 self._tenant_blobs[tenant_id] = {}
             self._tenant_blobs[tenant_id][path] = data
-            return f"gs://{self.storage_bucket}/{path}"
+            return f"local-sim://{self.storage_bucket}/{tenant_id}/{path}"
 
     def get_blob(self, path: str, tenant_id: str) -> Optional[bytes]:
         with self._lock:
@@ -600,6 +619,16 @@ class FirebaseSyncManager:
         self.backend.save_job(job)
         return job
 
+    @staticmethod
+    def _resolve_tenant(user: Optional[AuthUserContext], tenant_id: Optional[str]) -> str:
+        if user is not None:
+            if tenant_id and tenant_id != user.tenant_id:
+                raise PermissionError(f"Cross-tenant access denied: user tenant '{user.tenant_id}' cannot access '{tenant_id}'")
+            return user.tenant_id
+        if tenant_id:
+            return tenant_id
+        raise PermissionError("Tenant context required: missing user context or tenant_id")
+
     def update_job_progress(
         self,
         job_id: str,
@@ -611,7 +640,7 @@ class FirebaseSyncManager:
         error: Optional[str] = None,
         result_summary: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        t_id = tenant_id or (user.tenant_id if user else "default_tenant")
+        t_id = self._resolve_tenant(user, tenant_id)
         updates: Dict[str, Any] = {
             "status": status,
             "progress_pct": progress_pct,
@@ -624,15 +653,15 @@ class FirebaseSyncManager:
         return self.backend.update_job(job_id, t_id, updates)
 
     def get_job(self, job_id: str, user: Optional[AuthUserContext] = None, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        t_id = tenant_id or (user.tenant_id if user else "default_tenant")
+        t_id = self._resolve_tenant(user, tenant_id)
         return self.backend.get_job(job_id, t_id)
 
     def get_artifact(self, sha256: str, user: Optional[AuthUserContext] = None, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        t_id = tenant_id or (user.tenant_id if user else "default_tenant")
+        t_id = self._resolve_tenant(user, tenant_id)
         return self.backend.get_artifact(sha256, t_id)
 
     def get_findings(self, sha256: str, user: Optional[AuthUserContext] = None, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        t_id = tenant_id or (user.tenant_id if user else "default_tenant")
+        t_id = self._resolve_tenant(user, tenant_id)
         return self.backend.get_findings(sha256, t_id)
 
     def get_sync_status(self) -> Dict[str, Any]:

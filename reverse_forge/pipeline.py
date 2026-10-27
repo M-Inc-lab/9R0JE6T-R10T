@@ -106,6 +106,7 @@ class PipelineStateMachine:
                     ActionPermission.READ_HASH,
                     ActionPermission.STATIC_ANALYSIS,
                     ActionPermission.MODIFY_ARTIFACT,
+                    ActionPermission.EXPORT_REPORT,
                 ],
                 allow_all=False,
             )
@@ -146,8 +147,8 @@ class PipelineStateMachine:
         7: ActionPermission.DYNAMIC_SANDBOX,
         8: ActionPermission.STATIC_ANALYSIS,
         9: ActionPermission.STATIC_ANALYSIS,
-        10: ActionPermission.MODIFY_ARTIFACT,
-        11: ActionPermission.MODIFY_ARTIFACT,
+        10: ActionPermission.STATIC_ANALYSIS,
+        11: ActionPermission.STATIC_ANALYSIS,
     }
 
     def _check_hil_gate(
@@ -169,6 +170,7 @@ class PipelineStateMachine:
         sensitive_actions = (
             ActionPermission.DYNAMIC_SANDBOX,
             ActionPermission.NETWORK_ACCESS,
+            ActionPermission.DESTRUCTIVE_OP,
         )
 
         if action in sensitive_actions:

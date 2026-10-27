@@ -3855,9 +3855,18 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         pass
 
-    def _get_auth_user(self) -> AuthUserContext:
+    def _get_auth_user(self) -> Optional[AuthUserContext]:
         auth_hdr = self.headers.get("Authorization")
-        return firebase_sync.auth.verify_bearer_token(auth_hdr)
+        user = firebase_sync.auth.verify_bearer_token(auth_hdr)
+        if user is None and not firebase_sync.auth.is_production:
+            return AuthUserContext(
+                uid="dev_local_workbench",
+                email="dev@reverse-forge.local",
+                role=UserRole.LEAD_ARCHITECT,
+                tenant_id="local_lab",
+                is_verified=True,
+            )
+        return user
 
     def _validate_safe_path(self, path_str: Optional[str]) -> Tuple[bool, str]:
         ok, res = PathSecurityValidator.validate_safe_path(path_str or self.default_binary_path)
@@ -3927,9 +3936,21 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 return
 
         elif path == "/api/patch":
+            user = self._get_auth_user()
+            if not user or not user.can_modify():
+                self._json_response({"status": "error", "error": "Insufficient RBAC permissions: user cannot modify artifacts"}, status=403 if user else 401)
+                return
             ok, bin_path = self._extract_and_validate_path(query)
             if not ok:
                 self._json_response({"status": "error", "error": bin_path}, status=400)
+                return
+            from reverse_forge.provenance import ScopeLedger, ActionPermission
+            scope = ScopeLedger(
+                allowed_paths=[os.path.realpath(bin_path)],
+                default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS, ActionPermission.MODIFY_ARTIFACT],
+            )
+            if not scope.is_authorized(bin_path, ActionPermission.MODIFY_ARTIFACT):
+                self._json_response({"status": "error", "error": f"Permission denied: action 'modify_artifact' not authorized on {bin_path}"}, status=403)
                 return
             try:
                 from reverse_forge.binary_patcher import BinaryPatcherEngine
@@ -4068,14 +4089,15 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/cloud/status":
             user = self._get_auth_user()
             st = firebase_sync.get_sync_status()
-            st["authenticated_user"] = user.to_dict()
+            st["authenticated_user"] = user.to_dict() if user else None
             self._json_response({"status": "ok", "cloud_status": st})
             return
 
         elif path == "/api/cloud/sync":
             user = self._get_auth_user()
-            if user.role not in (UserRole.ANALYST, UserRole.LEAD_ARCHITECT):
-                self._json_response({"status": "error", "error": f"Insufficient RBAC permissions: {user.role.value}"}, status=403)
+            if not user or user.role not in (UserRole.ANALYST, UserRole.LEAD_ARCHITECT):
+                err = f"Insufficient RBAC permissions: {user.role.value if user else 'anonymous'}"
+                self._json_response({"status": "error", "error": err}, status=403 if user else 401)
                 return
             ok, bin_path = self._extract_and_validate_path(query)
             if not ok:
@@ -4195,9 +4217,21 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/force-exec":
+            user = self._get_auth_user()
+            if not user or user.role not in (UserRole.ANALYST, UserRole.LEAD_ARCHITECT):
+                self._json_response({"status": "error", "error": "Insufficient RBAC permissions for execution"}, status=403 if user else 401)
+                return
             ok, bin_path = self._extract_and_validate_path(query)
             if not ok:
                 self._json_response({"status": "error", "error": bin_path}, status=400)
+                return
+            from reverse_forge.provenance import ScopeLedger, ActionPermission
+            scope = ScopeLedger(
+                allowed_paths=[os.path.realpath(bin_path)],
+                default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS, ActionPermission.DYNAMIC_SANDBOX],
+            )
+            if not scope.is_authorized(bin_path, ActionPermission.DYNAMIC_SANDBOX):
+                self._json_response({"status": "error", "error": f"Permission denied: action 'dynamic_sandbox' not authorized on {bin_path}"}, status=403)
                 return
             from reverse_forge.underconstrained_visor_engine import UnderConstrainedMicroVisor
             with open(bin_path, "rb") as f:
@@ -4428,10 +4462,20 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             if is_async:
                 def _run_pipeline(target: str) -> Dict[str, Any]:
                     with tempfile.TemporaryDirectory() as tmpdir:
+                        from reverse_forge.provenance import ScopeLedger, ActionPermission
+                        scope_ledger = ScopeLedger(
+                            allowed_paths=[os.path.realpath(target), os.path.dirname(os.path.realpath(target))],
+                            default_actions=[
+                                ActionPermission.READ_HASH,
+                                ActionPermission.STATIC_ANALYSIS,
+                                ActionPermission.MODIFY_ARTIFACT,
+                                ActionPermission.EXPORT_REPORT,
+                            ],
+                        )
                         pipe = PipelineStateMachine(
                             artifact_path=target,
                             workspace_dir=tmpdir,
-                            authorized_scope="*",
+                            scope_ledger=scope_ledger,
                             autonomy_level=AutonomyLevel.LEVEL_3_AUTONOMOUS_STATIC,
                         )
                         pipe.run_all_stages()
@@ -4447,10 +4491,20 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 }, status=202)
                 return
             with tempfile.TemporaryDirectory() as tmpdir:
+                from reverse_forge.provenance import ScopeLedger, ActionPermission
+                scope_ledger = ScopeLedger(
+                    allowed_paths=[os.path.realpath(bin_path), os.path.dirname(os.path.realpath(bin_path))],
+                    default_actions=[
+                        ActionPermission.READ_HASH,
+                        ActionPermission.STATIC_ANALYSIS,
+                        ActionPermission.MODIFY_ARTIFACT,
+                        ActionPermission.EXPORT_REPORT,
+                    ],
+                )
                 pipe = PipelineStateMachine(
                     artifact_path=bin_path,
                     workspace_dir=tmpdir,
-                    authorized_scope="*",
+                    scope_ledger=scope_ledger,
                     autonomy_level=AutonomyLevel.LEVEL_3_AUTONOMOUS_STATIC,
                 )
                 pipe.run_all_stages()

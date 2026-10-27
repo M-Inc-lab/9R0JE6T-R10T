@@ -444,10 +444,12 @@ class WholeBinaryFunctionIndexer:
 
     def analyze_function(
         self,
-        target_va: Optional[int] = None,
+        target_va: Optional[Any] = None,
         custom_renames: Optional[Dict[str, str]] = None,
         comments: Optional[Dict[str, str]] = None,
     ) -> FunctionAnalysisBundle:
+        if hasattr(target_va, "va"):
+            target_va = target_va.va
         if target_va is None:
             target_va = self.main_va if self.main_va is not None else self.entry_va
 

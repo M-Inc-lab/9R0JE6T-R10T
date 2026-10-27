@@ -72,6 +72,11 @@ pub mod yara_sigma_bridge_containers;
 use std::slice;
 
 #[no_mangle]
+pub extern "C" fn rf_native_backend_identity() -> *const std::os::raw::c_char {
+    b"RUST_NATIVE\0".as_ptr() as *const std::os::raw::c_char
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn rf_rust_entropy(ptr: *const u8, len: usize) -> f64 {
     if ptr.is_null() || len == 0 {
         return 0.0;

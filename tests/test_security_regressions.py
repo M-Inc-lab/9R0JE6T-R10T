@@ -500,8 +500,121 @@ class TestHardenedScopeLedgerAndAuthentication(unittest.TestCase):
         # A valid library vector is accepted
         mock_lib.rf_rust_flirt_crc16.return_value = 0x906E
         mock_lib.rf_rust_entropy.return_value = 0.0
+        mock_lib.rf_rust_fnv1a_64.return_value = 0xf9e6e6ef197c2b25
         self.assertTrue(NativeRustAccelerator._validate_abi(mock_lib))
+
+    # ==========================================================================
+    # PHASE C: EXECUTION BOUNDARY & HIL REGRESSION TESTS
+    # ==========================================================================
+
+    def test_scope_approval_for_out_of_scope_action_denied(self):
+        """Even if operator HIL callback returns True, scope violation must deny action."""
+        from reverse_forge.pipeline import ReverseForgePipeline, StageStatus
+        from reverse_forge.provenance import ScopeLedger, ActionPermission
+        with tempfile.TemporaryDirectory() as td:
+            sample_p = os.path.join(td, "target.bin")
+            with open(sample_p, "wb") as f:
+                f.write(b"MZ" + b"\x00" * 128)
+
+            # Scope explicitly grants ONLY read_hash and static_analysis (NO dynamic_sandbox)
+            ledger = ScopeLedger(
+                allowed_paths=[sample_p],
+                default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS],
+            )
+            # Operator says YES (True)
+            hil_approved = lambda prompt, ctx: True
+            pipe = ReverseForgePipeline(
+                artifact_path=sample_p,
+                scope_ledger=ledger,
+                workspace_dir=td,
+                hil_callback=hil_approved,
+            )
+            pipe.execute_stage(0)
+            pipe.execute_stage(7)
+            # Must remain SKIPPED because scope denied action
+            self.assertEqual(pipe.stages[7].status, StageStatus.SKIPPED)
+            self.assertIn("not authorized", pipe.stages[7].output_summary.lower())
+
+    def test_scope_symlink_escape_blocked(self):
+        """Symlink resolving outside allowed_paths must be denied access."""
+        from reverse_forge.provenance import ScopeLedger, ActionPermission
+        with tempfile.TemporaryDirectory() as td1, tempfile.TemporaryDirectory() as td2:
+            real_victim = os.path.join(td2, "secret.key")
+            with open(real_victim, "w") as f:
+                f.write("SECRET_KEY_12345")
+
+            link_path = os.path.join(td1, "symlink_target.bin")
+            os.symlink(real_victim, link_path)
+
+            # Scope only allows td1
+            ledger = ScopeLedger(allowed_paths=[td1], default_actions=[ActionPermission.READ_HASH])
+            # Attempt to authorize symlink pointing to td2 must be denied
+            self.assertFalse(ledger.is_authorized(link_path, ActionPermission.READ_HASH))
+
+    def test_high_autonomy_cannot_bypass_scope_and_hil(self):
+        """Full autonomy level 4 is forbidden from bypassing HIL on sensitive actions."""
+        from reverse_forge.pipeline import ReverseForgePipeline, AutonomyLevel, StageStatus
+        from reverse_forge.provenance import ScopeLedger, ActionPermission
+        with tempfile.TemporaryDirectory() as td:
+            sample_p = os.path.join(td, "target.bin")
+            with open(sample_p, "wb") as f:
+                f.write(b"MZ" + b"\x00" * 128)
+
+            ledger = ScopeLedger(
+                allowed_paths=[sample_p],
+                default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS, ActionPermission.DYNAMIC_SANDBOX],
+            )
+            # Autonomous execution without operator callback
+            pipe = ReverseForgePipeline(
+                artifact_path=sample_p,
+                autonomy_level=AutonomyLevel.CONTINUOUS,
+                scope_ledger=ledger,
+                workspace_dir=td,
+                hil_callback=None,  # Missing callback
+            )
+            pipe.execute_stage(0)
+            pipe.execute_stage(7)
+            # Autonomy level 4 cannot bypass missing operator callback on dynamic sandbox
+            self.assertEqual(pipe.stages[7].status, StageStatus.SKIPPED)
+
+    def test_unauthorized_export_to_system_paths_denied(self):
+        """Exporting reports or mutating files inside protected system directories is blocked."""
+        from reverse_forge.provenance import ScopeLedger, ActionPermission
+        ledger = ScopeLedger(
+            allowed_patterns=["*"],
+            default_actions=[ActionPermission.EXPORT_REPORT, ActionPermission.MODIFY_ARTIFACT],
+        )
+        self.assertFalse(ledger.is_authorized("/etc/shadow", ActionPermission.EXPORT_REPORT))
+        self.assertFalse(ledger.is_authorized("/usr/bin/python3", ActionPermission.MODIFY_ARTIFACT))
+        self.assertFalse(ledger.is_authorized("/boot/vmlinuz", ActionPermission.DESTRUCTIVE_OP))
+
+    # ==========================================================================
+    # PHASE E: NATIVE BACKEND SELECTION & CACHE TESTS
+    # ==========================================================================
+
+    def test_native_forced_c_fallback_and_pure_python(self):
+        """Verify forced backend switching works deterministically."""
+        import shutil
+        from reverse_forge.native_rust_bridge import NativeRustAccelerator, BackendExecutionMode
+
+        # Test forced pure Python mode
+        py_lib = NativeRustAccelerator.ensure_compiled(force_backend=BackendExecutionMode.PURE_PYTHON)
+        self.assertIsNone(py_lib)
+        self.assertEqual(NativeRustAccelerator.get_active_backend(), BackendExecutionMode.PURE_PYTHON)
+
+        # Test forced C fallback mode
+        c_lib = NativeRustAccelerator.ensure_compiled(force_backend=BackendExecutionMode.C_FALLBACK)
+        if shutil.which("gcc") or shutil.which("clang"):
+            self.assertIsNotNone(c_lib)
+            self.assertEqual(NativeRustAccelerator.get_active_backend(), BackendExecutionMode.C_FALLBACK)
+
+    def test_native_missing_required_symbols_rejected(self):
+        """A library missing required FFI symbols must fail ABI validation."""
+        from reverse_forge.native_rust_bridge import NativeRustAccelerator
+        mock_incomplete = unittest.mock.MagicMock(spec=["rf_rust_entropy"])
+        self.assertFalse(NativeRustAccelerator._validate_abi(mock_incomplete))
 
 
 if __name__ == "__main__":
     unittest.main()
+

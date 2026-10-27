@@ -15,6 +15,10 @@
 #include <string.h>
 #include <math.h>
 
+const char *rf_native_backend_identity(void) {
+    return "C_FALLBACK";
+}
+
 double rf_rust_entropy(const uint8_t *ptr, size_t len) {
     if (!ptr || len == 0) return 0.0;
     uint64_t counts[256];

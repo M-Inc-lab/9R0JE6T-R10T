@@ -45,6 +45,7 @@ class ELFAnalyzer:
             "interpreter": None,
             "segments": [],
             "sections": [],
+            "is_stripped": True,
             "shared_libraries": [],
             "rpath": None,
             "runpath": None,
@@ -343,6 +344,7 @@ class ELFAnalyzer:
         exports_dedup = list(dict.fromkeys(exports_list))
         result["imported_symbols"] = imports_dedup[:250]
         result["exported_symbols"] = exports_dedup[:250]
+        result["is_stripped"] = not any(sec[1] == 2 for sec in raw_section_headers)
 
         capabilities: Dict[str, List[str]] = {}
         for sym in imports_dedup:

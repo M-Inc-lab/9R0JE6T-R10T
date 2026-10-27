@@ -31,19 +31,21 @@ class ArtifactProvenance:
 
 
 class ActionPermission(str, Enum):
-    """Fine-grained permission classes for reverse-engineering actions (§03.2)."""
+    """Fine-grained permission classes for reverse-engineering actions (§03.2, Phase C)."""
     READ_HASH = "read_hash"
     STATIC_ANALYSIS = "static_analysis"
     DYNAMIC_SANDBOX = "dynamic_sandbox"
     NETWORK_ACCESS = "network_access"
     MODIFY_ARTIFACT = "modify_artifact"
     EXTERNAL_SERVICE = "external_service"
+    EXPORT_REPORT = "export_report"
+    DESTRUCTIVE_OP = "destructive_op"
 
 
 class ScopeLedger:
     """
     Enforces authorization boundaries, canonical resource resolution, and rules of engagement.
-    Implements fail-closed security (§01, §03.2).
+    Implements fail-closed security (§01, §03.2, Phase C).
     """
 
     def __init__(
@@ -81,8 +83,8 @@ class ScopeLedger:
                 action = ActionPermission.READ_HASH
 
         # 1. Reject path traversal indicators and null bytes immediately
-        if "\x00" in target_identifier or "../" in target_identifier or "..\\" in target_identifier:
-            self._record_audit(target_identifier, action, authorized=False, reason="Path traversal payload rejected")
+        if not target_identifier or "\x00" in target_identifier or "../" in target_identifier or "..\\" in target_identifier:
+            self._record_audit(target_identifier or "empty", action, authorized=False, reason="Path traversal or invalid payload rejected")
             return False
 
         if self.allow_all:
@@ -100,6 +102,16 @@ class ScopeLedger:
             target_real = os.path.realpath(os.path.abspath(target_identifier))
         elif os.path.isabs(target_identifier):
             target_real = os.path.realpath(target_identifier)
+        else:
+            target_real = os.path.realpath(os.path.abspath(target_identifier))
+
+        # Check export destination constraints
+        if action in (ActionPermission.EXPORT_REPORT, ActionPermission.MODIFY_ARTIFACT, ActionPermission.DESTRUCTIVE_OP) and target_real:
+            blocked_system_roots = ("/etc", "/boot", "/root", "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/sys", "/proc")
+            for br in blocked_system_roots:
+                if target_real == br or target_real.startswith(br + os.sep):
+                    self._record_audit(target_identifier, action, authorized=False, reason="Operation inside protected system directory blocked")
+                    return False
 
         path_matched = False
         if target_real and self.allowed_paths:
@@ -118,7 +130,14 @@ class ScopeLedger:
                 pattern_matched = True
                 break
 
-        in_scope = path_matched or pattern_matched
+        # If allowed_paths is configured, target MUST be contained within allowed directory tree
+        if self.allowed_paths:
+            if not path_matched:
+                self._record_audit(target_identifier, action, authorized=False, reason="Target path outside allowed directory bounds")
+                return False
+            in_scope = pattern_matched if self.allowed_patterns else True
+        else:
+            in_scope = pattern_matched
         if not in_scope:
             self._record_audit(target_identifier, action, authorized=False, reason="Target not in scope")
             return False
@@ -212,7 +231,7 @@ class ProvenanceManager:
         in_scope = True
         scope_rule = "*"
         if scope_ledger:
-            in_scope = scope_ledger.is_authorized(basename)
+            in_scope = scope_ledger.is_authorized(abs_original)
             scope_rule = ",".join(scope_ledger.allowed_patterns) or ("ALL" if scope_ledger.allow_all else "NONE")
 
         provenance = ArtifactProvenance(

@@ -5,7 +5,9 @@ against independent reference tools (Capstone, ELF symbol tables) on benign fixt
 """
 
 import os
+import shutil
 import struct
+import subprocess
 import unittest
 
 try:
@@ -27,6 +29,21 @@ class TestDifferentialAnalysisValidation(unittest.TestCase):
         if os.path.exists(cls.target_elf):
             with open(cls.target_elf, "rb") as f:
                 cls.elf_data = f.read()
+
+        fix_dir = os.path.join(os.path.dirname(__file__), "fixtures")
+        src_c = os.path.join(fix_dir, "known_control_flow.c")
+        unstripped = os.path.join(fix_dir, "known_control_flow_unstripped.elf")
+        stripped = os.path.join(fix_dir, "known_control_flow_stripped.elf")
+        nofp = os.path.join(fix_dir, "known_control_flow_nofp.elf")
+        if os.path.exists(src_c) and shutil.which("gcc"):
+            if not os.path.exists(unstripped):
+                subprocess.run(["gcc", "-O2", "-g", src_c, "-o", unstripped], check=False)
+            if not os.path.exists(stripped) and os.path.exists(unstripped):
+                shutil.copy2(unstripped, stripped)
+                if shutil.which("strip"):
+                    subprocess.run(["strip", "-s", stripped], check=False)
+            if not os.path.exists(nofp):
+                subprocess.run(["gcc", "-O2", "-fomit-frame-pointer", src_c, "-o", nofp], check=False)
 
     def test_elf_format_and_architecture_detection_against_headers(self):
         """Validate ELF format and machine type match official System V AMD64 ELF specification."""
@@ -157,7 +174,155 @@ class TestDifferentialAnalysisValidation(unittest.TestCase):
         self.assertEqual(len(rep["sections"]), 1)
         self.assertEqual(rep["sections"][0]["name"], ".text")
 
+    def test_ground_truth_unstripped_elf_function_recovery(self):
+        """Validate ground-truth symbol recovery against known C source functions in compiled ELF."""
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "known_control_flow_unstripped.elf")
+        if not os.path.exists(fixture_path):
+            self.skipTest("Fixture known_control_flow_unstripped.elf not found")
+
+        with open(fixture_path, "rb") as f:
+            elf_data = f.read()
+
+        indexer = WholeBinaryFunctionIndexer(elf_data)
+        funcs = indexer.discover_all_functions()
+        func_names = {f.name for f in funcs}
+
+        # Verify ground-truth functions from known_control_flow.c are recovered
+        expected_symbols = [
+            "arithmetic_mem",
+            "target_add",
+            "target_sub",
+            "call_dispatch",
+            "switch_jump_table",
+            "tail_helper",
+            "tail_call_entry",
+            "main",
+        ]
+        for sym in expected_symbols:
+            self.assertIn(sym, func_names, f"Expected ground-truth symbol '{sym}' was not recovered")
+
+    def test_ground_truth_control_flow_and_jump_table(self):
+        """Validate CFG basic blocks and jump table decoding on switch_jump_table function."""
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "known_control_flow_unstripped.elf")
+        if not os.path.exists(fixture_path):
+            self.skipTest("Fixture known_control_flow_unstripped.elf not found")
+
+        with open(fixture_path, "rb") as f:
+            elf_data = f.read()
+
+        indexer = WholeBinaryFunctionIndexer(elf_data)
+        funcs = {f.name: f for f in indexer.discover_all_functions()}
+        self.assertIn("switch_jump_table", funcs)
+
+        switch_fn = funcs["switch_jump_table"]
+        bundle = indexer.analyze_function(switch_fn)
+        self.assertEqual(bundle.name, "switch_jump_table")
+        # Function must have multiple basic blocks due to the switch statement
+        self.assertGreaterEqual(len(bundle.cfg_blocks), 2)
+
+        # Differential disassembly with Capstone
+        switch_bytes = elf_data[switch_fn.file_offset : switch_fn.file_offset + (switch_fn.size or 64)]
+        if capstone is not None and switch_bytes:
+            md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+            insns = list(md.disasm(switch_bytes, switch_fn.va))
+            mnemonics = [i.mnemonic for i in insns]
+            # Must contain comparison or branch instruction for bounds checking
+            has_branch_or_cmp = any(m.startswith("j") or m in ("cmp", "test") for m in mnemonics)
+            self.assertTrue(has_branch_or_cmp)
+
+    def test_ground_truth_indirect_calls_and_arithmetic(self):
+        """Differentially check call_dispatch and arithmetic_mem instructions against Capstone."""
+        if capstone is None:
+            self.skipTest("Capstone required for differential instruction decoding")
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "known_control_flow_unstripped.elf")
+        if not os.path.exists(fixture_path):
+            self.skipTest("Fixture known_control_flow_unstripped.elf not found")
+
+        with open(fixture_path, "rb") as f:
+            elf_data = f.read()
+
+        indexer = WholeBinaryFunctionIndexer(elf_data)
+        funcs = {f.name: f for f in indexer.discover_all_functions()}
+
+        # 1. Arithmetic & memory function
+        self.assertIn("arithmetic_mem", funcs)
+        arith_fn = funcs["arithmetic_mem"]
+        arith_bytes = elf_data[arith_fn.file_offset : arith_fn.file_offset + (arith_fn.size or 64)]
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        arith_insns = list(md.disasm(arith_bytes, arith_fn.va))
+        arith_mnems = {i.mnemonic for i in arith_insns}
+        # Verify arithmetic instructions are present
+        has_arith = any(m in arith_mnems for m in ("add", "sub", "imul", "idiv", "lea"))
+        self.assertTrue(has_arith)
+
+        # 2. Call dispatch function (indirect call/tail call)
+        self.assertIn("call_dispatch", funcs)
+        call_fn = funcs["call_dispatch"]
+        call_bytes = elf_data[call_fn.file_offset : call_fn.file_offset + (call_fn.size or 64)]
+        call_insns = list(md.disasm(call_bytes, call_fn.va))
+        call_mnems = [i.mnemonic for i in call_insns]
+        self.assertTrue(any(m in ("call", "jmp") for m in call_mnems))
+
+        # 3. Direct calls in main
+        self.assertIn("main", funcs)
+        main_fn = funcs["main"]
+        main_bytes = elf_data[main_fn.file_offset : main_fn.file_offset + (main_fn.size or 128)]
+        main_insns = list(md.disasm(main_bytes, main_fn.va))
+        main_mnems = [i.mnemonic for i in main_insns]
+        self.assertIn("call", main_mnems)
+
+    def test_ground_truth_stripped_and_nofp_recovery(self):
+        """Validate function recovery on stripped and frame-pointer-omitted binaries."""
+        stripped_p = os.path.join(os.path.dirname(__file__), "fixtures", "known_control_flow_stripped.elf")
+        nofp_p = os.path.join(os.path.dirname(__file__), "fixtures", "known_control_flow_nofp.elf")
+        if not os.path.exists(stripped_p) or not os.path.exists(nofp_p):
+            self.skipTest("Fixtures not found")
+
+        with open(stripped_p, "rb") as f:
+            stripped_data = f.read()
+        with open(nofp_p, "rb") as f:
+            nofp_data = f.read()
+
+        # Stripped binary analysis
+        s_ana = ELFAnalyzer(stripped_data)
+        s_rep = s_ana.analyze()
+        self.assertTrue(s_rep["is_elf"])
+        self.assertTrue(s_rep["is_stripped"])
+
+        s_indexer = WholeBinaryFunctionIndexer(stripped_data)
+        s_funcs = s_indexer.discover_all_functions()
+        self.assertGreater(len(s_funcs), 0)
+
+        # Frame-pointer omitted binary analysis
+        nofp_ana = ELFAnalyzer(nofp_data)
+        nofp_rep = nofp_ana.analyze()
+        self.assertTrue(nofp_rep["is_elf"])
+
+        nofp_indexer = WholeBinaryFunctionIndexer(nofp_data)
+        nofp_funcs = nofp_indexer.discover_all_functions()
+        self.assertGreater(len(nofp_funcs), 0)
+
+    def test_adversarial_elf_truncations_and_bounds(self):
+        """Verify bounded memory and controlled errors when parsing truncated and cyclic ELFs."""
+        # 1. Truncated header (< 64 bytes)
+        trunc_elf = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00"
+        ana = ELFAnalyzer(trunc_elf)
+        res = ana.analyze()
+        self.assertTrue(len(res["warnings"]) > 0 or not res["is_elf"])
+
+        # 2. Section header offset exceeds file size
+        bad_shoff = bytearray(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8)
+        # e_shoff = 0x7FFFFFFF (way beyond file length), e_shentsize = 64, e_shnum = 10
+        bad_shoff += struct.pack("<HHIQQQIHHHHHH", 2, 0x3E, 1, 0x401000, 64, 0x7FFFFFFF, 0, 64, 56, 1, 64, 10, 0)
+        ana2 = ELFAnalyzer(bytes(bad_shoff))
+        res2 = ana2.analyze()
+        self.assertTrue(res2["is_elf"])
+        # Should gracefully record warnings without unhandled exceptions
+        self.assertTrue(len(res2["warnings"]) > 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
