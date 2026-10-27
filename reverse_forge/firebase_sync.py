@@ -30,6 +30,14 @@ try:
 except ImportError:
     jwt = None
 
+try:
+    from google.cloud import firestore, storage
+    from google.oauth2 import service_account
+except ImportError:
+    firestore = None
+    storage = None
+    service_account = None
+
 logger = logging.getLogger("reverse_forge.firebase_sync")
 
 
@@ -262,7 +270,7 @@ class FirebaseAuthManager:
         except jwt.InvalidAudienceError:
             logger.warning("Token verification failed: audience mismatch")
             return None
-        except (jwt.InvalidTokenError, jwt.MissingRequiredClaimError) as err:
+        except (getattr(jwt, "PyJWTError", Exception), TypeError, ValueError, Exception) as err:
             logger.warning("Token verification failed: %s", err)
             return None
 
@@ -415,58 +423,188 @@ class LocalSimulationPersistenceAdapter(PersistenceBackend):
 
 
 class ProductionFirestoreStorageAdapter(PersistenceBackend):
-    """Production Google Cloud Firestore and Cloud Storage adapter."""
+    """
+    Production Google Cloud Firestore and Cloud Storage adapter.
+    Performs verified, real SDK operations against Firestore and GCS (§07, Stage 4).
+    Enforces tenant isolation on all collections and storage paths.
+    """
 
-    def __init__(self, project_id: str, storage_bucket: str):
+    def __init__(
+        self,
+        project_id: str,
+        storage_bucket: str,
+        firestore_client: Optional[Any] = None,
+        storage_client: Optional[Any] = None,
+    ):
         self.project_id = project_id
         self.storage_bucket = storage_bucket
-        self._check_availability()
+        self._db = firestore_client
+        self._storage = storage_client
+        self._bucket = None
+        self._init_clients()
 
-    def _check_availability(self) -> None:
+    def _init_clients(self) -> None:
+        if self._db is not None and self._storage is not None:
+            try:
+                self._bucket = self._storage.bucket(self.storage_bucket)
+            except Exception:
+                pass
+            return
+
         key_path = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
-        if not key_path or not os.path.exists(key_path):
+        emulator_host = os.environ.get("FIRESTORE_EMULATOR_HOST")
+
+        if not emulator_host and (not key_path or not os.path.exists(key_path)):
             raise RuntimeError(
                 f"Production Google Cloud Firestore/Storage unavailable: "
                 f"FIREBASE_SERVICE_ACCOUNT_KEY is missing or invalid ({key_path})"
             )
+
+        if firestore is None or storage is None:
+            raise RuntimeError(
+                "Production Google Cloud Firestore/Storage unavailable: "
+                "google-cloud-firestore or google-cloud-storage packages are not installed."
+            )
+
+        if emulator_host:
+            self._db = firestore.Client(project=self.project_id)
+            self._storage = storage.Client(project=self.project_id)
+            self._bucket = self._storage.bucket(self.storage_bucket)
+        elif key_path and os.path.exists(key_path):
+            creds = service_account.Credentials.from_service_account_file(key_path)
+            self._db = firestore.Client(project=self.project_id, credentials=creds)
+            self._storage = storage.Client(project=self.project_id, credentials=creds)
+            self._bucket = self._storage.bucket(self.storage_bucket)
 
     @property
     def backend_type(self) -> str:
         return "cloud_firestore"
 
     def save_artifact(self, doc: FirestoreArtifactDocument) -> None:
-        self._check_availability()
+        if self._db is None:
+            self._init_clients()
+        if not doc.tenant_id or not doc.sha256:
+            raise ValueError("save_artifact requires valid tenant_id and sha256")
+        data = asdict(doc)
+        data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        ref = self._db.collection("tenants").document(doc.tenant_id).collection("artifacts").document(doc.sha256)
+        ref.set(data)
 
     def get_artifact(self, sha256: str, tenant_id: str) -> Optional[Dict[str, Any]]:
-        self._check_availability()
+        if self._db is None:
+            self._init_clients()
+        if not tenant_id or not sha256:
+            return None
+        ref = self._db.collection("tenants").document(tenant_id).collection("artifacts").document(sha256)
+        snap = ref.get()
+        if snap.exists:
+            return snap.to_dict()
         return None
 
     def save_findings(self, sha256: str, tenant_id: str, findings: List[Dict[str, Any]]) -> int:
-        self._check_availability()
-        return len(findings)
+        if self._db is None:
+            self._init_clients()
+        if not tenant_id or not sha256:
+            raise ValueError("save_findings requires valid tenant_id and sha256")
+        batch = self._db.batch()
+        findings_col = (
+            self._db.collection("tenants")
+            .document(tenant_id)
+            .collection("artifacts")
+            .document(sha256)
+            .collection("findings")
+        )
+        saved_count = 0
+        for f in findings:
+            fid = f.get("finding_id") or hashlib.sha256(json.dumps(f, sort_keys=True).encode()).hexdigest()[:16]
+            f_copy = dict(f)
+            f_copy["tenant_id"] = tenant_id
+            f_copy["saved_at"] = datetime.now(timezone.utc).isoformat()
+            ref = findings_col.document(fid)
+            batch.set(ref, f_copy)
+            saved_count += 1
+
+        art_ref = self._db.collection("tenants").document(tenant_id).collection("artifacts").document(sha256)
+        batch.set(art_ref, {"findings_count": saved_count, "updated_at": datetime.now(timezone.utc).isoformat()}, merge=True)
+        batch.commit()
+        return saved_count
 
     def get_findings(self, sha256: str, tenant_id: str) -> List[Dict[str, Any]]:
-        self._check_availability()
-        return []
+        if self._db is None:
+            self._init_clients()
+        if not tenant_id or not sha256:
+            return []
+        findings_col = (
+            self._db.collection("tenants")
+            .document(tenant_id)
+            .collection("artifacts")
+            .document(sha256)
+            .collection("findings")
+        )
+        docs = findings_col.stream()
+        return [d.to_dict() for d in docs]
 
     def save_job(self, doc: FirestoreJobDocument) -> None:
-        self._check_availability()
+        if self._db is None:
+            self._init_clients()
+        if not doc.tenant_id or not doc.job_id:
+            raise ValueError("save_job requires valid tenant_id and job_id")
+        data = asdict(doc)
+        ref = self._db.collection("tenants").document(doc.tenant_id).collection("jobs").document(doc.job_id)
+        ref.set(data)
 
     def update_job(self, job_id: str, tenant_id: str, updates: Dict[str, Any]) -> bool:
-        self._check_availability()
-        return False
+        if self._db is None:
+            self._init_clients()
+        if not tenant_id or not job_id:
+            return False
+        ref = self._db.collection("tenants").document(tenant_id).collection("jobs").document(job_id)
+        snap = ref.get()
+        if not snap.exists:
+            return False
+        up = dict(updates)
+        up["updated_at"] = datetime.now(timezone.utc).isoformat()
+        ref.update(up)
+        return True
 
     def get_job(self, job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
-        self._check_availability()
+        if self._db is None:
+            self._init_clients()
+        if not tenant_id or not job_id:
+            return None
+        ref = self._db.collection("tenants").document(tenant_id).collection("jobs").document(job_id)
+        snap = ref.get()
+        if snap.exists:
+            return snap.to_dict()
         return None
 
     def store_blob(self, path: str, data: bytes, tenant_id: str) -> str:
-        self._check_availability()
-        return f"gs://{self.storage_bucket}/{path}"
+        if self._storage is None:
+            self._init_clients()
+        if not tenant_id or not path:
+            raise ValueError("store_blob requires valid tenant_id and path")
+        if self._bucket is None:
+            self._bucket = self._storage.bucket(self.storage_bucket)
+        clean_path = path.lstrip("/")
+        blob_name = f"tenants/{tenant_id}/{clean_path}"
+        blob = self._bucket.blob(blob_name)
+        blob.upload_from_string(data, content_type="application/octet-stream")
+        return f"gs://{self.storage_bucket}/{blob_name}"
 
     def get_blob(self, path: str, tenant_id: str) -> Optional[bytes]:
-        self._check_availability()
-        return None
+        if self._storage is None:
+            self._init_clients()
+        if not tenant_id or not path:
+            return None
+        if self._bucket is None:
+            self._bucket = self._storage.bucket(self.storage_bucket)
+        clean_path = path.lstrip("/")
+        blob_name = f"tenants/{tenant_id}/{clean_path}"
+        blob = self._bucket.blob(blob_name)
+        try:
+            return blob.download_as_bytes()
+        except Exception:
+            return None
 
 
 # ==============================================================================

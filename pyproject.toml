@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,8 +7,8 @@ name = "reverse-forge"
 version = "26.0.0"
 description = "R3V3R53//F0RG3 - Self-Sufficient Cross-Platform Reverse Engineering & Vulnerability Research Suite"
 readme = "README.md"
-requires-python = ">=3.9"
-license = {text = "GPL-3.0-only"}
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
 dependencies = [
     "pefile>=2023.2.7",
     "capstone>=5.0.0",
@@ -26,7 +26,6 @@ colab = [
 ]
 symbolic = [
     "z3-solver>=4.12.0",
-    "angr>=9.2.0",
 ]
 dbi = [
     "frida>=16.0.0",
@@ -40,7 +39,6 @@ all = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
     "pydantic>=2.0.0",
-    "angr>=9.2.0",
     "frida>=16.0.0",
     "frida-tools>=12.0.0",
 ]
@@ -50,3 +48,35 @@ reverse-forge = "reverse_forge.cli:main"
 reverse-forge-repl = "reverse_forge.repl:main"
 reverse-forge-gui = "reverse_forge.gui_server:start_gui_workbench"
 reverse-forge-app = "reverse_forge.desktop_app:main"
+
+# ---------------------------------------------------------------------------
+# Package discovery: include only the reverse_forge Python package.
+# rust_core/ is a Cargo workspace (no __init__.py) and must never be treated
+# as a Python package by setuptools flat-layout discovery.
+# ---------------------------------------------------------------------------
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reverse_forge*"]
+exclude = [
+    "rust_core*",
+    "tests*",
+    "docs*",
+    ".github*",
+    "__pycache__*",
+]
+
+# Ship native shared libraries and test fixtures inside the package.
+[tool.setuptools.package-data]
+reverse_forge = [
+    "bin/*.so",
+    "bin/*.dll",
+    "bin/*.dylib",
+    "bin/*.pyd",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+

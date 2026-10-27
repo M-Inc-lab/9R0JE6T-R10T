@@ -80,10 +80,33 @@ class NativeRustAccelerator:
         return list(cls._last_build_diagnostics)
 
     @classmethod
+    def _get_toolchain_identity(cls) -> str:
+        """Captures toolchain identity, compiler versions, and target architecture for cache invalidation."""
+        idents = [f"{sys.platform}_{platform.machine()}"]
+        try:
+            r_proc = subprocess.run(["rustc", "--version"], capture_output=True, text=True, timeout=5, check=False)
+            if r_proc.returncode == 0:
+                idents.append(r_proc.stdout.strip())
+        except Exception:
+            pass
+
+        try:
+            c_bin = shutil.which("gcc") or shutil.which("clang") or shutil.which("cc")
+            if c_bin:
+                c_proc = subprocess.run([c_bin, "--version"], capture_output=True, text=True, timeout=5, check=False)
+                if c_proc.returncode == 0:
+                    idents.append(c_proc.stdout.splitlines()[0].strip())
+        except Exception:
+            pass
+
+        idents.append("CFLAGS=-O3 -shared -fPIC -lm;RUSTFLAGS=--release;ABI=v2")
+        return ";".join(idents)
+
+    @classmethod
     def compute_source_fingerprint(cls, repo_root: str) -> str:
         """
         Computes cryptographic SHA-256 fingerprint over source files, compiler identity,
-        and host architecture to prevent loading stale or mismatched native artifacts.
+        build flags, target architecture, and ABI version to prevent loading stale or mismatched native artifacts.
         """
         hasher = hashlib.sha256()
         rust_dir = os.path.join(repo_root, "rust_core")
@@ -106,8 +129,8 @@ class NativeRustAccelerator:
                 with open(fpath, "rb") as f:
                     hasher.update(f.read())
 
-        # 2. Host architecture and platform
-        hasher.update(f"{sys.platform}_{platform.machine()}".encode())
+        # 2. Host architecture, toolchain identity, compiler versions, and build flags
+        hasher.update(cls._get_toolchain_identity().encode("utf-8"))
         return hasher.hexdigest()
 
     @classmethod

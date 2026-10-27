@@ -5,6 +5,7 @@ Coordinates Stage 0–11 autonomous progression, Human-In-the-Loop (HIL) gates, 
 """
 
 import enum
+import hashlib
 import os
 import time
 from dataclasses import dataclass, field
@@ -19,6 +20,15 @@ from reverse_forge.pe_analyzer import PEAnalyzer
 from reverse_forge.provenance import ActionPermission, ArtifactProvenance, ProvenanceManager, ScopeLedger
 from reverse_forge.reporter import Finding, ReportGenerator
 from reverse_forge.behavioral_engine import BehavioralTelemetryEngine
+from reverse_forge.authorization import (
+    ApprovalGrant,
+    AuthorizationDecision,
+    AuthorizationDeniedError,
+    CentralAuthorizationBoundary,
+    OperationType,
+    get_authorization_boundary,
+)
+from reverse_forge.firebase_sync import AuthUserContext, UserRole
 
 
 class AutonomyLevel(enum.IntEnum):
@@ -91,9 +101,24 @@ class PipelineStateMachine:
         scope_ledger: Optional[ScopeLedger] = None,
         workspace_dir: Optional[str] = None,
         hil_callback: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
+        principal: Optional[AuthUserContext] = None,
+        tenant_id: str = "default_tenant",
+        approval_grant: Optional[ApprovalGrant] = None,
+        strict_auth: bool = False,
     ):
         self.artifact_path = os.path.abspath(artifact_path)
         self.autonomy_level = autonomy_level
+        self.tenant_id = tenant_id
+        self.principal = principal or AuthUserContext(
+            uid="local_operator",
+            email="operator@reverse-forge.local",
+            role=UserRole.ANALYST,
+            tenant_id=tenant_id,
+            is_verified=True,
+        )
+        self.active_approval_grant = approval_grant
+        self.strict_auth = strict_auth
+        self.authorization_boundary = get_authorization_boundary()
         if scope_ledger is not None:
             self.scope_ledger = scope_ledger
         else:
@@ -151,14 +176,30 @@ class PipelineStateMachine:
         11: ActionPermission.STATIC_ANALYSIS,
     }
 
+    STAGE_OPERATION_MAP = {
+        0: OperationType.READ_METADATA,
+        1: OperationType.STATIC_ANALYSIS,
+        2: OperationType.STATIC_ANALYSIS,
+        3: OperationType.STATIC_ANALYSIS,
+        4: OperationType.STATIC_ANALYSIS,
+        5: OperationType.STATIC_ANALYSIS,
+        6: OperationType.STATIC_ANALYSIS,
+        7: OperationType.DYNAMIC_SANDBOX,
+        8: OperationType.STATIC_ANALYSIS,
+        9: OperationType.STATIC_ANALYSIS,
+        10: OperationType.EXPORT_REPORT,
+        11: OperationType.REMEDIATION_PATCH,
+    }
+
     def _check_hil_gate(
         self,
         prompt: str,
         context: Dict[str, Any],
         action: ActionPermission = ActionPermission.DYNAMIC_SANDBOX,
+        operation: Optional[OperationType] = None,
     ) -> bool:
         """
-        Enforce mandatory human approval and scope authorization (§03.2, §03.3, Stage 3).
+        Enforce mandatory human approval and scope authorization through CentralAuthorizationBoundary (§04).
         Autonomous mode CANNOT bypass security policies for sensitive actions.
         Missing HIL callback strictly denies sensitive actions (fail-closed).
         """
@@ -166,26 +207,24 @@ class PipelineStateMachine:
         if not self.scope_ledger.is_authorized(self.artifact_path, action=action):
             return False
 
-        # 2. Sensitive action gates require human operator sign-off
-        sensitive_actions = (
-            ActionPermission.DYNAMIC_SANDBOX,
-            ActionPermission.NETWORK_ACCESS,
-            ActionPermission.DESTRUCTIVE_OP,
+        op = operation or (OperationType.DYNAMIC_SANDBOX if action == ActionPermission.DYNAMIC_SANDBOX else OperationType.STATIC_ANALYSIS)
+        target_sha256 = self.provenance.sha256 if self.provenance else hashlib.sha256(self.binary_bytes).hexdigest()
+
+        permitted, decision, reason, grant = self.authorization_boundary.evaluate_request(
+            principal=self.principal,
+            operation=op,
+            target_path=self.artifact_path,
+            target_sha256=target_sha256,
+            target_tenant_id=self.tenant_id,
+            parameters=context,
+            scope_ledger=self.scope_ledger,
+            approval_grant=self.active_approval_grant,
+            hil_callback=self.hil_callback,
+            autonomy_level=self.autonomy_level.value,
         )
-
-        if action in sensitive_actions:
-            if self.hil_callback:
-                return bool(self.hil_callback(prompt, context))
-            # Missing HIL approval callback strictly denies sensitive actions fail-closed
-            return False
-
-        # Static analysis and local artifact generation can proceed under autonomous progression
-        # if explicitly permitted by the scope policy
-        if self.autonomy_level in (AutonomyLevel.AUTONOMOUS, AutonomyLevel.CONTINUOUS):
-            return True
-        if self.hil_callback:
-            return bool(self.hil_callback(prompt, context))
-        return False
+        if permitted and grant:
+            self.active_approval_grant = grant
+        return permitted
 
     def run_all(self) -> Dict[str, Any]:
         """Execute the full 12-stage pipeline sequentially."""
@@ -210,6 +249,37 @@ class PipelineStateMachine:
                 stage_id,
                 StageStatus.FAILED,
                 error=f"Security Policy Denied: Action '{req_action.value}' not authorized by ScopeLedger for target '{self.artifact_path}'"
+            )
+            return False
+
+        # Central authorization boundary evaluation
+        op = self.STAGE_OPERATION_MAP.get(stage_id, OperationType.STATIC_ANALYSIS)
+        target_sha256 = self.provenance.sha256 if self.provenance else (hashlib.sha256(self.binary_bytes).hexdigest() if self.binary_bytes else "")
+        permitted, decision, reason, grant = self.authorization_boundary.evaluate_request(
+            principal=self.principal,
+            operation=op,
+            target_path=self.artifact_path,
+            target_sha256=target_sha256,
+            target_tenant_id=self.tenant_id,
+            parameters={"stage": stage_id},
+            scope_ledger=self.scope_ledger,
+            approval_grant=self.active_approval_grant,
+            hil_callback=self.hil_callback if op in self.authorization_boundary.MANDATORY_HIL_OPERATIONS else None,
+            autonomy_level=self.autonomy_level.value,
+        )
+        if not permitted:
+            if op in self.authorization_boundary.MANDATORY_HIL_OPERATIONS and not self.strict_auth:
+                self._mark_stage(
+                    stage_id,
+                    StageStatus.SKIPPED,
+                    summary=f"Skipped: Operator declined or unauthorized ({reason})"
+                )
+                return True
+            self._mark_stage(
+                stage_id,
+                StageStatus.SKIPPED if op in self.authorization_boundary.MANDATORY_HIL_OPERATIONS else StageStatus.FAILED,
+                error=f"Security Policy Denied: {reason}" if op not in self.authorization_boundary.MANDATORY_HIL_OPERATIONS else None,
+                summary=f"Skipped: Operator declined or unauthorized ({reason})" if op in self.authorization_boundary.MANDATORY_HIL_OPERATIONS else "",
             )
             return False
 
@@ -572,7 +642,7 @@ class PipelineStateMachine:
         )
         if not authorized:
             self._mark_stage(7, StageStatus.SKIPPED, summary="Operator declined sandboxed dynamic execution.")
-            return True
+            return False if self.strict_auth else True
 
         from reverse_forge.windows_sandbox import WindowsSandbox
         from reverse_forge.posix_sandbox import POSIXSandboxEngine
@@ -696,6 +766,25 @@ class PipelineStateMachine:
 
     # Stage 11: Defensive Remediation Synthesis
     def _stage_11(self) -> bool:
+        target_sha256 = self.provenance.sha256 if self.provenance else (hashlib.sha256(self.binary_bytes).hexdigest() if self.binary_bytes else "")
+        permitted, decision, reason, grant = self.authorization_boundary.evaluate_request(
+            principal=self.principal,
+            operation=OperationType.REMEDIATION_PATCH,
+            target_path=self.artifact_path,
+            target_sha256=target_sha256,
+            target_tenant_id=self.tenant_id,
+            parameters={"stage": 11},
+            scope_ledger=self.scope_ledger,
+            approval_grant=self.active_approval_grant,
+            hil_callback=self.hil_callback,
+            autonomy_level=self.autonomy_level.value,
+        )
+        if not permitted:
+            if self.strict_auth:
+                raise AuthorizationDeniedError(decision, reason, {})
+            self._mark_stage(11, StageStatus.SKIPPED, summary=f"Central boundary denied remediation synthesis: {reason}")
+            return False
+
         from reverse_forge.remediation_engine import RemediationEngine
         from reverse_forge.patch_verifier import PatchVerifier
         rem_engine = RemediationEngine()

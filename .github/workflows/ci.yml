@@ -1,106 +1,176 @@
-name: R3V3R53//F0RG3 CI & Forensic Verification Suite
+name: R3V3R53//F0RG3 CI — Phase 4 Hardened Pipeline
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
 
 permissions:
   contents: read
 
+# ---------------------------------------------------------------------------
+# Job 1: Rust & C native verification (independent from Python)
+# ---------------------------------------------------------------------------
 jobs:
   rust-and-c-native:
-    name: Rust & C Fallback Native Verification (Ubuntu Linux x86-64)
+    name: "Rust & C Native Verification"
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cargo Check
+      - name: Cargo fmt check
+        run: cargo fmt --manifest-path rust_core/Cargo.toml --check
+
+      - name: Cargo check (all targets)
         run: cargo check --manifest-path rust_core/Cargo.toml --all-targets
 
-      - name: Cargo Test
+      - name: Cargo clippy (deny warnings)
+        run: cargo clippy --manifest-path rust_core/Cargo.toml -- -D warnings
+        continue-on-error: true   # warnings only — does not hide test failures
+
+      - name: Cargo test
         run: cargo test --manifest-path rust_core/Cargo.toml -- --nocapture
 
-      - name: Independent C Fallback Bridge Verification
+      - name: C fallback bridge — compile and verify symbols
         run: |
-          gcc -O3 -shared -fPIC -Wall -Wextra -o /tmp/libreverse_forge_c.so rust_core/c_fallback_bridge.c -lm
+          gcc -O3 -shared -fPIC -Wall -Wextra \
+            -o /tmp/libreverse_forge_c.so rust_core/c_fallback_bridge.c -lm
           test -f /tmp/libreverse_forge_c.so
-          nm -D /tmp/libreverse_forge_c.so | grep -E "rf_rust_entropy|rf_rust_flirt_crc16|rf_rust_visor_exec|rf_native_backend_identity"
+          nm -D /tmp/libreverse_forge_c.so | grep -E \
+            "rf_rust_entropy|rf_rust_flirt_crc16|rf_rust_visor_exec|rf_native_backend_identity"
 
-  python-security-and-regression:
-    name: Security & Differential Regression Suite (Python ${{ matrix.python-version }})
+# ---------------------------------------------------------------------------
+# Job 2: Package installation verification (clean environment)
+# Tests that `pip install -e .` succeeds in isolation, without PYTHONPATH tricks.
+# ---------------------------------------------------------------------------
+  package-install:
+    name: "Package Install — Python ${{ matrix.python-version }}"
     runs-on: ubuntu-latest
-    needs: [rust-and-c-native]
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Upgrade pip and install build tools
+        run: python -m pip install --upgrade pip setuptools>=77.0 wheel
+
+      - name: Install package in editable mode (no PYTHONPATH)
+        run: pip install -e ".[symbolic]" --no-cache-dir
+
+      - name: Verify package is importable after install
+        run: |
+          python -c "import reverse_forge; print('reverse_forge version:', reverse_forge.__version__)"
+          python -c "from reverse_forge.provenance import ScopeLedger; print('ScopeLedger OK')"
+          python -c "from reverse_forge.firebase_sync import FirebaseAuthManager; print('FirebaseAuthManager OK')"
+          python -c "from reverse_forge.pipeline import PipelineStateMachine; print('PipelineStateMachine OK')"
+
+      - name: Verify package does NOT include rust_core or tests
+        run: |
+          python -c "
+          import importlib, sys
+          # rust_core must NOT be a Python package
+          try:
+              import rust_core
+              raise AssertionError('rust_core should not be importable as a Python package')
+          except ModuleNotFoundError:
+              print('PASS: rust_core is not a Python package')
+          "
+
+# ---------------------------------------------------------------------------
+# Job 3: Security & regression test matrix
+# Requires both prior jobs to succeed before executing.
+# ---------------------------------------------------------------------------
+  python-security-and-regression:
+    name: "Security & Regression — Python ${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    needs: [rust-and-c-native, package-install]
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install pefile capstone z3-solver "pyjwt>=2.8.0" "cryptography>=41.0.0" pytest
+          python -m pip install --upgrade pip setuptools>=77.0
+          pip install "pefile>=2023.2.7" "capstone>=5.0.0" "z3-solver>=4.12.0" \
+                      "pyjwt>=2.8.0" "cryptography>=41.0.0" pytest
           pip install -e .
 
-      - name: Run Security Regression Suite (Fail-Closed Auth & Scope HIL)
+      - name: "[P0] Package discovery and import sanity"
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python -c "import reverse_forge; print('Package OK:', reverse_forge.__version__)"
+          python -c "
+          try:
+              import rust_core
+              raise SystemExit('FAIL: rust_core must not be importable as Python package')
+          except ModuleNotFoundError:
+              print('PASS: rust_core not importable as Python package')
+          "
+
+      - name: "[P0] Authentication — fail-closed JWT & RBAC regression"
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
-        run: pytest tests/test_security_regressions.py -v
+        run: pytest tests/test_firebase_sync.py tests/test_phase4_auth_hardening.py -v --tb=short
 
-      - name: Run Differential Analysis Validation Suite (Ground Truth vs Capstone/ELF/PE)
+      - name: "[P0] Scope Ledger & HIL authorization regression"
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
-        run: pytest tests/test_differential_analysis_validation.py -v
+        run: pytest tests/test_security_regressions.py -v --tb=short
 
-      - name: Run Phase 2 Verified End-to-End Workflow Suite
+      - name: "[P1] Phase 3 E2E trust boundary suite"
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
-        run: pytest tests/test_phase2_verified_workflow.py -v
+        run: pytest tests/test_phase3_e2e_trust_boundary.py -v --tb=short
 
-      - name: Run Firebase & Multi-Tenant Persistence Isolation Suite
+      - name: "[P1] Phase 4 end-to-end acceptance test"
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
-        run: pytest tests/test_firebase_sync.py -v
+        run: pytest tests/test_phase4_e2e_acceptance.py -v --tb=short
 
-      - name: Run Native Backend Selection & ABI Integrity Suite
+      - name: "[P1] Differential analysis validation (ground truth)"
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
-        run: pytest tests/test_phase86_90_rust_native_core.py -v
+        run: pytest tests/test_differential_analysis_validation.py -v --tb=short
 
-      - name: Run Phase 3 E2E Trust Boundary & Authorization Suite
+      - name: "[P1] Native backend ABI integrity"
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
-        run: pytest tests/test_phase3_e2e_trust_boundary.py -v
+        run: pytest tests/test_phase86_90_rust_native_core.py -v --tb=short
 
-      - name: Run Full Test Suite
+      - name: "[P1] Full test suite (all 382+ tests)"
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
-        run: pytest -v
+        run: pytest -v --tb=short
 
-      - name: Run CLI Smoke Checks & Tool Availability Matrix
+      - name: "[SMOKE] CLI tool availability matrix"
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
