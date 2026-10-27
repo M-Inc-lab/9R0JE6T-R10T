@@ -471,3 +471,8 @@ class FineGrainedTaintTracker:
 
         return summary
 
+
+# Backward-compatible alias
+FineGrainTaintEngine = FineGrainedTaintTracker
+fine_grain_taint_engine = FineGrainedTaintTracker
+

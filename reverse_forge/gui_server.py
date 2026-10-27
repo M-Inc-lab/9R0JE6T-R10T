@@ -50,6 +50,9 @@ from reverse_forge.unified_decompiler_pipeline import UnifiedDecompilerPipeline
 from reverse_forge.whole_binary_function_indexer import WholeBinaryFunctionIndexer
 from reverse_forge.project_workspace_db import ProjectWorkspaceDB
 from reverse_forge.pipeline import PipelineStateMachine, AutonomyLevel
+from reverse_forge.capability_registry import capability_registry
+from reverse_forge.intent_engine import intent_compiler
+from reverse_forge.investigation_workflow import investigation_engine, HypothesisStatus
 
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -852,6 +855,7 @@ footer {
     <button class="nav-tab" onclick="switchBottomTab('hex')"><span># Hex Inspector</span></button>
     <button class="nav-tab" onclick="switchBottomTab('hud')"><span>🛡 Mitigations HUD</span></button>
     <button class="nav-tab" onclick="switchBottomTab('console')"><span>Engine & Triage Console</span></button>
+    <button class="nav-tab" onclick="switchBottomTab('intent')"><span>🎯 Intent Studio</span></button>
   </nav>
 
   <div class="header-actions">
@@ -1016,6 +1020,7 @@ footer {
           <button class="pane-subtab" id="btab-hud" onclick="switchBottomTab('hud')">🛡 Mitigations HUD</button>
           <button class="pane-subtab" id="btab-struct" onclick="switchBottomTab('struct')">🧬 Format Anatomy & Entropy</button>
           <button class="pane-subtab" id="btab-intel" onclick="switchBottomTab('intel')">🧠 Capabilities & Strings</button>
+          <button class="pane-subtab" id="btab-intent" onclick="switchBottomTab('intent')">🎯 Intent Investigation Studio</button>
         </div>
       </div>
 
@@ -1104,6 +1109,78 @@ footer {
                 <span id="entropy-summary-badge" style="color:var(--success)">Peak: 6.42 b/B (Clean Native Code)</span>
               </div>
               <canvas id="entropy-waveform-canvas" width="520" height="128" style="width:100%;height:128px;border:1px solid #1e293b;border-radius:4px;background:#050811;"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom Tab 6: Intent-Driven Investigation Studio -->
+        <div class="bottom-tab-panel" id="bpanel-intent">
+          <div style="display:flex;flex-direction:column;flex:1;height:100%;padding:12px;gap:10px;overflow-y:auto;background:var(--bg-dark);">
+            <!-- Top Controls Row -->
+            <div style="display:flex;gap:8px;align-items:center;background:var(--bg-panel);padding:10px 14px;border-radius:6px;border:1px solid var(--border-strong);">
+              <span style="font-weight:700;color:var(--primary);font-size:12px;white-space:nowrap;">🎯 INVESTIGATION INTENT:</span>
+              <input type="text" id="intent-input-box" class="query-bar" style="flex:1;width:auto;" placeholder="e.g. 'Trace data flow from user input to sensitive buffer copy', 'Extract embedded configuration', 'Root cause crash'..." value="Find potential buffer overflow or memory corruption vulnerabilities">
+              <button class="btn" style="background:rgba(56,189,248,0.15);color:var(--primary);border-color:var(--primary);font-weight:600;" onclick="compileInvestigationIntent()">Compile Plan</button>
+              <button class="btn" style="background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff;font-weight:700;" onclick="startIntentInvestigation()">⚡ Launch Investigation</button>
+              <button class="btn" onclick="fetchToolCapabilities()">Tool Catalog</button>
+            </div>
+
+            <!-- Investigation Stage Progress Stepper -->
+            <div id="intent-stepper" style="display:flex;gap:4px;overflow-x:auto;padding:8px 0;">
+              <!-- 9 stages dynamically rendered here -->
+            </div>
+
+            <!-- HIL Action Gate Alert Banner (visible when status == 'BLOCKED_HIL') -->
+            <div id="hil-action-gate" style="display:none;background:rgba(239,68,68,0.12);border:1px solid #ef4444;border-radius:6px;padding:12px 16px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <span style="font-weight:800;color:#ef4444;font-size:13px;display:flex;align-items:center;gap:6px;">
+                  ⚠️ HUMAN-IN-THE-LOOP (HIL) SAFETY GATE TRIGGERED
+                </span>
+                <span class="badge" style="background:#ef4444;color:#fff;">ACTION BLOCKED</span>
+              </div>
+              <p id="hil-gate-desc" style="font-size:12px;color:var(--text-main);margin:0 0 10px 0;">Dynamic execution requires explicit operator authorization.</p>
+              <div style="display:flex;gap:8px;">
+                <button class="btn" style="background:#10b981;color:#fff;font-weight:700;" onclick="submitHilDecision('APPROVE_SANDBOXED')">✓ Authorize Sandboxed Execution</button>
+                <button class="btn" style="background:#f59e0b;color:#fff;font-weight:700;" onclick="submitHilDecision('REJECT_STATIC_ONLY')">✗ Reject &amp; Restrict to Static Analysis Only</button>
+              </div>
+            </div>
+
+            <!-- Main Studio Content Grid -->
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;flex:1;min-height:220px;">
+              <!-- Panel 1: Compiled Blueprint & Objective -->
+              <div style="background:var(--bg-panel);border:1px solid var(--border-strong);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;">
+                <div style="font-size:11px;font-weight:700;color:var(--primary);letter-spacing:0.5px;border-bottom:1px solid var(--border-strong);padding-bottom:4px;">
+                  INVESTIGATION SPECIFICATION
+                </div>
+                <div id="intent-spec-details" style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);display:flex;flex-direction:column;gap:4px;">
+                  <div><strong style="color:var(--text-main);">Status:</strong> <span id="intent-status-badge" class="badge">READY</span></div>
+                  <div><strong style="color:var(--text-main);">Objective:</strong> <span id="intent-obj-type">-</span></div>
+                  <div><strong style="color:var(--text-main);">Selected Tools:</strong> <span id="intent-tool-list">-</span></div>
+                  <div><strong style="color:var(--text-main);">Safety:</strong> <span id="intent-safety-status">Subprocess Sandbox &amp; HIL active</span></div>
+                </div>
+              </div>
+
+              <!-- Panel 2: Live Hypotheses & Confidence -->
+              <div style="background:var(--bg-panel);border:1px solid var(--border-strong);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;">
+                <div style="font-size:11px;font-weight:700;color:var(--accent);letter-spacing:0.5px;border-bottom:1px solid var(--border-strong);padding-bottom:4px;display:flex;justify-content:space-between;">
+                  <span>SCIENTIFIC HYPOTHESES</span>
+                  <span id="hypo-count-badge" class="badge">0</span>
+                </div>
+                <div id="intent-hypotheses-list" style="display:flex;flex-direction:column;gap:6px;font-size:11px;">
+                  <span style="color:var(--text-muted);font-style:italic;">No active hypotheses formulated yet.</span>
+                </div>
+              </div>
+
+              <!-- Panel 3: Corroborated Evidence & Deliverables -->
+              <div style="background:var(--bg-panel);border:1px solid var(--border-strong);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;">
+                <div style="font-size:11px;font-weight:700;color:var(--success);letter-spacing:0.5px;border-bottom:1px solid var(--border-strong);padding-bottom:4px;display:flex;justify-content:space-between;">
+                  <span>VERIFIABLE EVIDENCE &amp; FINDINGS</span>
+                  <span id="evidence-count-badge" class="badge">0</span>
+                </div>
+                <div id="intent-evidence-list" style="display:flex;flex-direction:column;gap:6px;font-size:11px;">
+                  <span style="color:var(--text-muted);font-style:italic;">Evidence will populate as stages execute.</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -2209,7 +2286,7 @@ function switchView(viewId) {
     switchLeftPaneMode('disasm');
   } else if (viewId === 'decomp') {
     switchIrTab('c');
-  } else if (viewId === 'hex' || viewId === 'hud' || viewId === 'intel' || viewId === 'console') {
+  } else if (viewId === 'hex' || viewId === 'hud' || viewId === 'intel' || viewId === 'console' || viewId === 'intent') {
     switchBottomTab(viewId);
   }
 }
@@ -2224,7 +2301,7 @@ function switchIrTab(tab) {
 }
 
 function switchBottomTab(tab) {
-  ['hex', 'console', 'hud', 'intel', 'struct'].forEach(k => {
+  ['hex', 'console', 'hud', 'intel', 'struct', 'intent'].forEach(k => {
     const b = document.getElementById('btab-' + k);
     const p = document.getElementById('bpanel-' + k);
     if (b) b.classList.toggle('active', k === tab);
@@ -3266,6 +3343,231 @@ function triggerCloudSync() {
     });
 }
 
+// --- INTENT-DRIVEN INVESTIGATION PLATFORM ENGINE ---
+
+let currentInvestigationId = null;
+let investigationPollTimer = null;
+
+const INVESTIGATION_STAGES = [
+  "1. Intake & Format",
+  "2. Reconnaissance",
+  "3. Static Analysis",
+  "4. Hypotheses",
+  "5. Dynamic Planning",
+  "6. Sandboxed Exec",
+  "7. Slicing & Taint",
+  "8. Finding Validation",
+  "9. Deliverables"
+];
+
+function renderInvestigationStepper(activeStageIdx, isBlockedHil, isCompleted) {
+  const container = document.getElementById('intent-stepper');
+  if (!container) return;
+  container.innerHTML = INVESTIGATION_STAGES.map((s, idx) => {
+    const stageNum = idx + 1;
+    let bg = 'var(--bg-panel)';
+    let border = 'var(--border-strong)';
+    let color = 'var(--text-muted)';
+    let badge = 'PENDING';
+
+    if (stageNum < activeStageIdx || isCompleted) {
+      bg = 'rgba(16, 185, 129, 0.15)';
+      border = '#10b981';
+      color = '#10b981';
+      badge = 'DONE';
+    } else if (stageNum === activeStageIdx) {
+      if (isBlockedHil) {
+        bg = 'rgba(239, 68, 68, 0.2)';
+        border = '#ef4444';
+        color = '#ef4444';
+        badge = 'HIL BLOCKED';
+      } else {
+        bg = 'rgba(56, 189, 248, 0.2)';
+        border = 'var(--primary)';
+        color = 'var(--primary)';
+        badge = 'RUNNING';
+      }
+    }
+    return `
+      <div style="flex:1;min-width:105px;background:${bg};border:1px solid ${border};border-radius:4px;padding:6px;text-align:center;">
+        <div style="font-size:10px;font-weight:700;color:${color};margin-bottom:2px;">${s}</div>
+        <span class="badge" style="font-size:9px;padding:1px 4px;border-color:${border};color:${color};">${badge}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+async function compileInvestigationIntent() {
+  const intent = document.getElementById('intent-input-box').value.trim();
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  setStatus('COMPILING INVESTIGATION SPECIFICATION...', 'var(--warning)');
+  try {
+    const res = await fetch('/api/investigate/compile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ intent, path })
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      const spec = data.spec;
+      document.getElementById('intent-status-badge').textContent = 'COMPILED';
+      document.getElementById('intent-status-badge').style.borderColor = 'var(--primary)';
+      document.getElementById('intent-obj-type').textContent = `${spec.objective_type} (${spec.candidate_techniques.join(', ')})`;
+      document.getElementById('intent-tool-list').textContent = spec.candidate_tools.join(', ');
+      renderInvestigationStepper(1, false, false);
+      setStatus(`INVESTIGATION BLUEPRINT COMPILED (${spec.candidate_tools.length} TOOLS SELECTIVELY RANKED)`, 'var(--success)');
+      logConsole('INVESTIGATION BLUEPRINT', JSON.stringify(spec, null, 2));
+    } else {
+      setStatus('COMPILE ERROR: ' + data.error, 'var(--danger)');
+    }
+  } catch (e) {
+    setStatus('NETWORK ERROR: ' + e.message, 'var(--danger)');
+  }
+}
+
+async function startIntentInvestigation() {
+  const intent = document.getElementById('intent-input-box').value.trim();
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  setStatus('LAUNCHING INTENT-DRIVEN INVESTIGATION...', 'var(--warning)');
+  try {
+    const res = await fetch('/api/investigate/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ intent, path })
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      currentInvestigationId = data.investigation_id;
+      setStatus(`INVESTIGATION ${currentInvestigationId} LAUNCHED`, 'var(--warning)');
+      pollInvestigationStatus(currentInvestigationId);
+    } else {
+      setStatus('START ERROR: ' + data.error, 'var(--danger)');
+    }
+  } catch (e) {
+    setStatus('NETWORK ERROR: ' + e.message, 'var(--danger)');
+  }
+}
+
+function pollInvestigationStatus(invId) {
+  if (investigationPollTimer) clearInterval(investigationPollTimer);
+  investigationPollTimer = setInterval(async () => {
+    try {
+      const res = await fetch('/api/investigate/status?id=' + encodeURIComponent(invId));
+      const data = await res.json();
+      if (data.status === 'ok') {
+        const state = data.state;
+        updateInvestigationUI(state);
+        if (state.status === 'COMPLETED' || state.status === 'FAILED') {
+          clearInterval(investigationPollTimer);
+        }
+      }
+    } catch (e) {
+      clearInterval(investigationPollTimer);
+    }
+  }, 750);
+}
+
+function updateInvestigationUI(state) {
+  document.getElementById('intent-status-badge').textContent = state.status;
+  document.getElementById('intent-obj-type').textContent = `${state.spec.objective_type} — ${state.spec.primary_objective}`;
+  document.getElementById('intent-tool-list').textContent = state.spec.candidate_tools.join(', ');
+
+  const isBlocked = (state.status === 'BLOCKED_HIL');
+  const isCompleted = (state.status === 'COMPLETED');
+  renderInvestigationStepper(state.current_stage_idx, isBlocked, isCompleted);
+
+  // HIL Gate Banner
+  const hilGate = document.getElementById('hil-action-gate');
+  if (isBlocked && state.hil_pending_request) {
+    hilGate.style.display = 'block';
+    document.getElementById('hil-gate-desc').textContent = state.hil_pending_request.description || 'Operator authorization required.';
+    setStatus('INVESTIGATION PAUSED: OPERATOR APPROVAL REQUIRED (HIL GATE)', 'var(--danger)');
+  } else {
+    hilGate.style.display = 'none';
+  }
+
+  // Hypotheses List
+  const hypoContainer = document.getElementById('intent-hypotheses-list');
+  const hypos = Object.values(state.hypotheses || {});
+  document.getElementById('hypo-count-badge').textContent = hypos.length;
+  if (hypos.length > 0) {
+    hypoContainer.innerHTML = hypos.map(h => `
+      <div style="background:var(--bg-dark);border:1px solid var(--border-strong);border-radius:4px;padding:6px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+          <span style="font-weight:700;color:var(--text-main);font-size:10.5px;">${h.hypothesis_id}</span>
+          <span class="badge" style="color:${h.status==='SUPPORTED'?'#10b981':'#f59e0b'};border-color:${h.status==='SUPPORTED'?'#10b981':'#f59e0b'};font-size:9px;">
+            ${h.status} (${Math.round(h.confidence*100)}%)
+          </span>
+        </div>
+        <p style="margin:0 0 4px 0;color:var(--text-muted);font-size:10px;">${h.claim}</p>
+        <div style="font-size:9.5px;color:var(--primary);font-family:var(--font-mono);">Test: ${h.test_plan}</div>
+      </div>
+    `).join('');
+  }
+
+  // Evidence List
+  const evContainer = document.getElementById('intent-evidence-list');
+  const evItems = Object.values(state.evidence || {});
+  document.getElementById('evidence-count-badge').textContent = evItems.length;
+  if (evItems.length > 0) {
+    evContainer.innerHTML = evItems.slice(-4).reverse().map(e => `
+      <div style="background:var(--bg-dark);border:1px solid var(--border-strong);border-radius:4px;padding:6px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
+          <span style="font-weight:700;color:var(--success);font-size:10.5px;">${e.address_va} · [${e.source_tool_id}]</span>
+          <span style="color:var(--text-muted);font-size:9px;">${e.stage_name}</span>
+        </div>
+        <div style="color:var(--text-main);font-size:10px;margin-bottom:2px;">${e.observation_summary}</div>
+        <pre style="margin:0;font-size:9px;background:#050811;padding:3px;border-radius:3px;color:#94a3b8;white-space:pre-wrap;">${e.raw_snippet}</pre>
+      </div>
+    `).join('');
+  }
+
+  if (isCompleted) {
+    setStatus('INVESTIGATION COMPLETE (100% EVIDENCE VALIDATED)', 'var(--success)');
+    logConsole('VERIFIED INVESTIGATION DELIVERABLES', JSON.stringify(state.deliverables, null, 2));
+  }
+}
+
+async function submitHilDecision(decision) {
+  if (!currentInvestigationId) return;
+  setStatus(`SUBMITTING HIL DECISION (${decision})...`, 'var(--warning)');
+  try {
+    const res = await fetch('/api/investigate/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: currentInvestigationId,
+        action: 'dynamic_execution',
+        decision: decision,
+        operator: 'lead_architect'
+      })
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      setStatus(`HIL DECISION APPLIED: ${decision}. RESUMING WORKFLOW...`, 'var(--success)');
+      pollInvestigationStatus(currentInvestigationId);
+    } else {
+      setStatus('HIL ERROR: ' + data.error, 'var(--danger)');
+    }
+  } catch (e) {
+    setStatus('NETWORK ERROR: ' + e.message, 'var(--danger)');
+  }
+}
+
+async function fetchToolCapabilities() {
+  try {
+    const res = await fetch('/api/capabilities');
+    const data = await res.json();
+    if (data.status === 'ok') {
+      logConsole('OPEN-SOURCE CAPABILITY REGISTRY & PROVENANCE CATALOG', JSON.stringify(data.capabilities, null, 2));
+      switchBottomTab('console');
+      setStatus(`PROVENANCE REGISTRY: ${data.total_capabilities} CAPABILITIES CATALOGED`, 'var(--success)');
+    }
+  } catch (e) {
+    setStatus('FAILED TO FETCH CAPABILITIES: ' + e.message, 'var(--danger)');
+  }
+}
+
 function uploadBinaryFile(file) {
   if (!file) return;
   setStatus(`INDEXING ${file.name}...`, 'var(--warning)');
@@ -3664,6 +3966,74 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 self._json_response({"status": "error", "error": str(e)}, status=400)
                 return
 
+        elif path == "/api/investigate/compile":
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                intent_text = payload.get("intent", "").strip()
+                target_path = payload.get("path", "").strip() or self.default_binary_path
+                fmt_hint = payload.get("format_hint")
+                arch_hint = payload.get("arch_hint")
+                if not os.path.exists(target_path):
+                    target_path = self.default_binary_path
+                spec = intent_compiler.compile(intent_text, target_path, fmt_hint, arch_hint)
+                self._json_response({"status": "ok", "spec": spec.to_dict()})
+                return
+            except Exception as e:
+                self._json_response({"status": "error", "error": str(e)}, status=400)
+                return
+
+        elif path == "/api/investigate/start":
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                intent_text = payload.get("intent", "").strip()
+                target_path = payload.get("path", "").strip() or self.default_binary_path
+                fmt_hint = payload.get("format_hint")
+                arch_hint = payload.get("arch_hint")
+                if not os.path.exists(target_path):
+                    target_path = self.default_binary_path
+                state = investigation_engine.create_investigation(intent_text, target_path, fmt_hint, arch_hint)
+
+                def _run_inv(inv_id: str) -> Dict[str, Any]:
+                    inv_state = investigation_engine.run_to_completion_or_hil(inv_id)
+                    return inv_state.to_dict()
+
+                job_id = job_manager.submit_job("intent_investigation", _run_inv, state.investigation_id)
+                self._json_response({
+                    "status": "ok",
+                    "investigation_id": state.investigation_id,
+                    "job_id": job_id,
+                    "state": state.to_dict(),
+                })
+                return
+            except Exception as e:
+                self._json_response({"status": "error", "error": str(e)}, status=400)
+                return
+
+        elif path == "/api/investigate/approve":
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                inv_id = payload.get("id", "").strip()
+                action = payload.get("action", "dynamic_execution")
+                decision = payload.get("decision", "APPROVE_SANDBOXED")
+                operator = payload.get("operator", "analyst")
+                state = investigation_engine.submit_hil_decision(inv_id, action, decision, operator=operator)
+
+                def _resume_inv(i_id: str) -> Dict[str, Any]:
+                    resumed = investigation_engine.run_to_completion_or_hil(i_id)
+                    return resumed.to_dict()
+
+                job_id = job_manager.submit_job("intent_investigation_resume", _resume_inv, inv_id)
+                self._json_response({
+                    "status": "ok",
+                    "investigation_id": inv_id,
+                    "job_id": job_id,
+                    "state": state.to_dict(),
+                })
+                return
+            except Exception as e:
+                self._json_response({"status": "error", "error": str(e)}, status=400)
+                return
+
         self._json_response({"error": "Endpoint not found"}, status=404)
 
     def do_GET(self) -> None:
@@ -3729,6 +4099,26 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 self._json_response({"status": "error", "error": f"Job not found: {job_id}"}, status=404)
                 return
             self._json_response({"status": "ok", "job": job})
+            return
+
+        elif path == "/api/capabilities":
+            self._json_response({
+                "status": "ok",
+                "total_capabilities": len(capability_registry.get_all_capabilities()),
+                "capabilities": capability_registry.export_catalog(),
+            })
+            return
+
+        elif path == "/api/investigate/status":
+            inv_id = query.get("id", [""])[0]
+            if not inv_id:
+                self._json_response({"status": "error", "error": "Missing id parameter"}, status=400)
+                return
+            state = investigation_engine.get_investigation(inv_id)
+            if not state:
+                self._json_response({"status": "error", "error": f"Investigation not found: {inv_id}"}, status=404)
+                return
+            self._json_response({"status": "ok", "state": state.to_dict()})
             return
 
         elif path == "/api/function":
@@ -4168,11 +4558,13 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode("utf-8"))
 
 
+class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 def start_gui_workbench(port: int = 8080, open_browser: bool = True, binary_path: Optional[str] = None) -> None:
     """Launch the local 4-Pane Synchronized GUI workbench server."""
-    class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-        allow_reuse_address = True
-        daemon_threads = True
 
     if binary_path is None and os.path.exists("/bin/ls"):
         binary_path = "/bin/ls"

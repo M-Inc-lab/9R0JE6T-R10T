@@ -44,6 +44,7 @@ pub mod open_source_jadx_ilspy_ast;
 pub mod web_studio_server;
 pub mod repl_canvas_corpus_gdb;
 pub mod open_source_sleigh_zydis_capstone;
+pub mod workflow_intent_engine;
 
 pub mod bytecode_jvm_dex_clr_wasm;
 pub mod checksec_cfi_audit;
