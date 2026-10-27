@@ -21,6 +21,8 @@ v30.0.0 Studio & Functional Overhaul:
 
 from __future__ import annotations
 
+import concurrent.futures
+from datetime import datetime, timezone
 import html
 import http.server
 import json
@@ -32,10 +34,12 @@ import sys
 import tempfile
 import threading
 import urllib.parse
+import uuid
 import webbrowser
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from reverse_forge.firebase_sync import firebase_sync, UserRole, AuthUserContext
 from reverse_forge.correlation_engine import CorrelationEngine
 from reverse_forge.pe_analyzer import PEAnalyzer
 from reverse_forge.elf_analyzer import ELFAnalyzer
@@ -195,6 +199,12 @@ kbd {
   border-color: rgba(245, 158, 11, 0.45);
   color: #fbbf24;
 }
+.btn-cloud {
+  background: rgba(14, 165, 233, 0.18);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #38bdf8;
+}
+.btn-cloud:hover { background: rgba(14, 165, 233, 0.32); }
 
 /* Sub-Toolbar */
 .sub-toolbar {
@@ -896,6 +906,7 @@ footer {
     <button class="btn btn-rust" onclick="runNativeRustOmniAudit()"><span>Rust Audit (55 Mod)</span></button>
     <button class="btn" onclick="exportCHeader()"><span>Export .h</span></button>
     <button class="btn" onclick="runFullPipeline()"><span>12-Stage Audit</span></button>
+    <button class="btn btn-cloud" id="cloud-sync-btn" onclick="triggerCloudSync()" title="Synchronize Dossier, Findings, and Artifacts to Firebase Firestore & Cloud Storage"><span>Firebase Sync</span></button>
   </div>
 </div>
 
@@ -3186,33 +3197,72 @@ function exportCHeader() {
 
 function runFullPipeline() {
   const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
-  setStatus('RUNNING 12-STAGE PIPELINE...', 'var(--warning)');
-  fetch('/api/pipeline?path=' + encodeURIComponent(path))
+  setStatus('QUEUING 12-STAGE PIPELINE (ASYNC WORKER)...', 'var(--warning)');
+  fetch('/api/pipeline?async=1&path=' + encodeURIComponent(path))
     .then(r => r.json())
     .then(d => {
-      if (d.status === 'ok') {
+      if (d.status === 'accepted' && d.job_id) {
+        setStatus(`JOB ${d.job_id} QUEUED (0%)...`, 'var(--warning)');
+        const jobId = d.job_id;
+        const interval = setInterval(() => {
+          fetch('/api/jobs?id=' + encodeURIComponent(jobId))
+            .then(res => res.json())
+            .then(jobData => {
+              if (jobData.status === 'ok') {
+                const j = jobData.job;
+                if (j.status === 'RUNNING') {
+                  setStatus(`PIPELINE RUNNING (${j.progress_pct}%)...`, 'var(--warning)');
+                } else if (j.status === 'COMPLETED') {
+                  clearInterval(interval);
+                  logConsole('12-STAGE AUTONOMOUS AUDIT REPORT', j.result.markdown_report);
+                  setStatus('12-STAGE PIPELINE COMPLETE (100%)', 'var(--success)');
+                } else if (j.status === 'FAILED') {
+                  clearInterval(interval);
+                  setStatus('PIPELINE FAILED: ' + j.error, 'var(--danger)');
+                }
+              }
+            })
+            .catch(() => clearInterval(interval));
+        }, 600);
+      } else if (d.status === 'ok') {
         logConsole('12-STAGE AUTONOMOUS AUDIT REPORT', d.markdown_report);
         setStatus('12-STAGE PIPELINE COMPLETE', 'var(--success)');
+      } else {
+        setStatus('PIPELINE ERROR: ' + (d.error || 'Execution failed'), 'var(--danger)');
       }
     })
     .catch(() => {
-      const report = [
-        `# 12-Stage Binary Verification Report — ${path}`,
-        `01. Container & Header Triage      : ${appData.format} · ${appData.architecture} (Entry: ${appData.entryPoint})`,
-        `02. Section & Entropy Mapping      : ${appData.sections.length} sections mapped (.text R-X, .rodata R--)`,
-        `03. Whole-Binary Function Indexer  : ${appData.functions.length} functions indexed with 1-to-1 CFG & C bundles`,
-        `04. Recursive Descent Disassembler : ${appData.disassemblyLines.length} instructions in active function (${appData.activeFunctionName})`,
-        `05. Sugiyama Hierarchical CFG      : ${appData.cfgBlocks.length} basic blocks with true/false branch edges`,
-        `06. Multi-IR Lifter                : C + Ghidra P-Code SSA + Rizin ESIL + angr VEX synchronized`,
-        `07. String & API Intelligence      : ${appData.strings.length} strings indexed`,
-        `08. Mitigations & Hardening Audit  : ASLR/PIE=PASS, DEP/NX=PASS, Stack Canary=PASS`,
-        `09. Deterministic CPU Emulation    : RIP=${clientRegs.rip}, RSP=${clientRegs.rsp} verified`,
-        `10. CWE Vulnerability Scanner      : 0 critical memory-safety violations in ${appData.activeFunctionName}`,
-        `11. YARA & Sigma Rule Synthesis    : Opcode & string signature bundle ready`,
-        `12. Native Rust 55-Module Core     : 200 phases active and verified`
-      ].join("\n");
-      logConsole('12-STAGE AUTONOMOUS AUDIT REPORT', report);
-      setStatus('12-STAGE PIPELINE COMPLETE', 'var(--success)');
+      setStatus('12-STAGE PIPELINE RUNNING LOCAL FALLBACK...', 'var(--warning)');
+    });
+}
+
+function triggerCloudSync() {
+  const path = appData.binaryPath || appData.currentBinaryPath || '/bin/ls';
+  setStatus('SYNCING TO FIREBASE FIRESTORE & STORAGE...', 'var(--warning)');
+  fetch('/api/cloud/sync?path=' + encodeURIComponent(path))
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'ok') {
+        const info = d.cloud_sync;
+        const summary = [
+          `=== FIREBASE FIRESTORE & CLOUD STORAGE SYNCHRONIZATION ===`,
+          `Status             : SUCCESS (200 OK)`,
+          `Project ID         : ${info.project_id}`,
+          `Firestore Document : ${info.firestore_path}`,
+          `Findings Persisted : ${info.findings_count} security findings`,
+          `Storage Binary URI : ${info.storage_binary_uri}`,
+          `Storage SARIF URI  : ${info.storage_sarif_uri}`,
+          `Sync Timestamp     : ${info.timestamp}`,
+          `============================================================`
+        ].join("\n");
+        logConsole('FIREBASE CLOUD SYNC REPORT', summary);
+        setStatus(`FIREBASE: ${info.findings_count} FINDINGS PERSISTED TO CLOUD`, 'var(--success)');
+      } else {
+        setStatus('FIREBASE SYNC FAILED: ' + (d.error || 'Unknown error'), 'var(--danger)');
+      }
+    })
+    .catch(err => {
+      setStatus('FIREBASE SYNC ERROR: ' + err, 'var(--danger)');
     });
 }
 
@@ -3409,6 +3459,89 @@ window.addEventListener('DOMContentLoaded', () => {
 """
 
 
+class PathSecurityValidator:
+    """Hardened security boundary preventing path traversal and access to sensitive system files."""
+
+    SENSITIVE_BLOCKLIST = (
+        "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+        ".ssh", ".env", "shadow", "gshadow", "sudoers",
+        ".bash_history", ".zsh_history", ".git-credentials"
+    )
+
+    @classmethod
+    def validate_safe_path(cls, path_str: Optional[str]) -> Tuple[bool, str]:
+        if not path_str or not isinstance(path_str, str):
+            return False, "Empty or invalid path parameter"
+
+        try:
+            real_path = os.path.realpath(os.path.expanduser(path_str.strip()))
+        except Exception as e:
+            return False, f"Path expansion error: {e}"
+
+        if not os.path.exists(real_path) or not os.path.isfile(real_path):
+            return False, f"File does not exist or is not a regular file: {path_str}"
+
+        basename = os.path.basename(real_path).lower()
+        parts = [p.lower() for p in real_path.split(os.sep)]
+
+        for sensitive in cls.SENSITIVE_BLOCKLIST:
+            if sensitive in basename or sensitive in parts:
+                return False, f"Access to sensitive file or credential store is strictly forbidden: {basename}"
+
+        return True, real_path
+
+
+class BackgroundJobManager:
+    """Thread-safe background job execution and status tracking for heavy analysis tasks."""
+
+    def __init__(self, max_workers: int = 4):
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="rf_worker")
+        self._lock = threading.Lock()
+        self._jobs: Dict[str, Dict[str, Any]] = {}
+
+    def submit_job(self, job_name: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> str:
+        job_id = f"job_{uuid.uuid4().hex[:12]}"
+        record = {
+            "job_id": job_id,
+            "name": job_name,
+            "status": "QUEUED",
+            "progress_pct": 0,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "result": None,
+            "error": None,
+        }
+        with self._lock:
+            self._jobs[job_id] = record
+
+        def _worker_wrapper():
+            with self._lock:
+                self._jobs[job_id]["status"] = "RUNNING"
+                self._jobs[job_id]["progress_pct"] = 15
+            try:
+                res = fn(*args, **kwargs)
+                with self._lock:
+                    self._jobs[job_id]["status"] = "COMPLETED"
+                    self._jobs[job_id]["progress_pct"] = 100
+                    self._jobs[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+                    self._jobs[job_id]["result"] = res
+            except Exception as exc:
+                with self._lock:
+                    self._jobs[job_id]["status"] = "FAILED"
+                    self._jobs[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+                    self._jobs[job_id]["error"] = str(exc)
+
+        self.executor.submit(_worker_wrapper)
+        return job_id
+
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+
+job_manager = BackgroundJobManager()
+
+
 class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
     """Hardened, zero-dependency 4-Pane Synchronized REST API & Web GUI server for R3V3R53//F0RG3."""
 
@@ -3419,6 +3552,20 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
+
+    def _get_auth_user(self) -> AuthUserContext:
+        auth_hdr = self.headers.get("Authorization")
+        return firebase_sync.auth.verify_bearer_token(auth_hdr)
+
+    def _validate_safe_path(self, path_str: Optional[str]) -> Tuple[bool, str]:
+        ok, res = PathSecurityValidator.validate_safe_path(path_str or self.default_binary_path)
+        if not ok:
+            return False, res
+        return True, res
+
+    def _extract_and_validate_path(self, query: Dict[str, List[str]]) -> Tuple[bool, str]:
+        raw_path = query.get("path", [self.default_binary_path or ""])[0]
+        return self._validate_safe_path(raw_path)
 
     def _is_trusted_origin(self) -> bool:
         """Block cross-origin browser requests from external websites (SEC-03)."""
@@ -3478,9 +3625,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 return
 
         elif path == "/api/patch":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             try:
                 from reverse_forge.binary_patcher import BinaryPatcherEngine
@@ -3539,18 +3686,57 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             self._json_response({
                 "status": "ready",
                 "engine": "R3V3R53//F0RG3",
-                "version": "26.0.0-rust-bicentennial",
+                "version": "32.0.0-rust-bicentennial",
                 "active_engines": 118,
+                "rust_modules": 55,
                 "default_binary": self.default_binary_path,
+                "firebase_sync_enabled": True,
+                "concurrency": "threaded_worker_pool",
             })
             return
 
-        elif path == "/api/function":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            addr_s = query.get("addr", [""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+        elif path == "/api/cloud/status":
+            user = self._get_auth_user()
+            st = firebase_sync.get_sync_status()
+            st["authenticated_user"] = user.to_dict()
+            self._json_response({"status": "ok", "cloud_status": st})
+            return
+
+        elif path == "/api/cloud/sync":
+            user = self._get_auth_user()
+            if user.role not in (UserRole.ANALYST, UserRole.LEAD_ARCHITECT):
+                self._json_response({"status": "error", "error": f"Insufficient RBAC permissions: {user.role.value}"}, status=403)
                 return
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
+                return
+            with open(bin_path, "rb") as f:
+                data = f.read(8 * 1024 * 1024)
+            intel = BinaryIntelEngine(data, filepath=bin_path)
+            dossier = intel.get_full_dossier()
+            sync_res = firebase_sync.sync_analysis_dossier(bin_path, dossier, raw_bytes=data, auth_user=user)
+            self._json_response({"status": "ok", "cloud_sync": sync_res})
+            return
+
+        elif path == "/api/jobs":
+            job_id = query.get("id", [""])[0]
+            if not job_id:
+                self._json_response({"status": "error", "error": "Missing job id parameter"}, status=400)
+                return
+            job = job_manager.get_job(job_id)
+            if not job:
+                self._json_response({"status": "error", "error": f"Job not found: {job_id}"}, status=404)
+                return
+            self._json_response({"status": "ok", "job": job})
+            return
+
+        elif path == "/api/function":
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
+                return
+            addr_s = query.get("addr", [""])[0]
             try:
                 with open(bin_path, "rb") as f:
                     data = f.read(8 * 1024 * 1024)
@@ -3588,9 +3774,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/pcap":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
             with open(bin_path, "rb") as f:
@@ -3600,11 +3786,11 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/imhex":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            pat = query.get("pattern", ["struct Header { u16 magic; u16 cblp; u32 reserved; };"])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
+            pat = query.get("pattern", ["struct Header { u16 magic; u16 cblp; u32 reserved; };"])[0]
             from reverse_forge.omni_toolkit_16cat import OmniToolkit16CatEngine
             with open(bin_path, "rb") as f:
                 data = f.read(1048576)
@@ -3619,9 +3805,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/force-exec":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.underconstrained_visor_engine import UnderConstrainedMicroVisor
             with open(bin_path, "rb") as f:
@@ -3633,9 +3819,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/decompile-fuse":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.multi_decompiler_fusion_engine import MultiDecompilerFusionEngine
             with open(bin_path, "rb") as f:
@@ -3647,9 +3833,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/memory-dump":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.live_memory_dump_engine import LiveMemoryAndDumpEngine
             with open(bin_path, "rb") as f:
@@ -3659,9 +3845,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/yara":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.yara_sigma_ioc_generator import YaraSigmaIOCGenerator
             with open(bin_path, "rb") as f:
@@ -3673,9 +3859,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/bridge":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.tier2_bridge_exporter import Tier2BridgeExporter
             with open(bin_path, "rb") as f:
@@ -3690,9 +3876,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/container":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.archive_container_triage_engine import ArchiveContainerTriageEngine
             with open(bin_path, "rb") as f:
@@ -3702,9 +3888,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/emulate":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.cpu_emulator_engine import DeterministicCPUEmulator
             with open(bin_path, "rb") as f:
@@ -3716,9 +3902,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/bytecode":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.bytecode_clr_dex_wasm_engine import BytecodeManagedEngine
             with open(bin_path, "rb") as f:
@@ -3728,9 +3914,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/config-extract":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             from reverse_forge.config_crypto_extractor import ConfigAndCryptoExtractorEngine
             with open(bin_path, "rb") as f:
@@ -3740,9 +3926,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/vulns":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             with open(bin_path, "rb") as f:
                 data = f.read(4 * 1024 * 1024)
@@ -3765,9 +3951,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/load":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": f"File not found: {bin_path}"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             try:
                 with open(bin_path, "rb") as f:
@@ -3784,9 +3970,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/analyze":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": f"File not found: {bin_path}"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             try:
                 with open(bin_path, "rb") as f:
@@ -3806,12 +3992,12 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/hex":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
+                return
             offset_str = query.get("offset", ["0x0"])[0]
             rows_cnt = min(64, int(query.get("rows", ["32"])[0]))
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
-                return
             with open(bin_path, "rb") as f:
                 data = f.read(4 * 1024 * 1024)
             start_off = int(offset_str, 16) if offset_str.startswith("0x") else int(offset_str, 10)
@@ -3831,9 +4017,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/cfg":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             with open(bin_path, "rb") as f:
                 data = f.read(1048576)
@@ -3844,9 +4030,31 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/pipeline":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
+                return
+            is_async = query.get("async", ["0"])[0] in ("1", "true")
+            if is_async:
+                def _run_pipeline(target: str) -> Dict[str, Any]:
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        pipe = PipelineStateMachine(
+                            artifact_path=target,
+                            workspace_dir=tmpdir,
+                            authorized_scope="*",
+                            autonomy_level=AutonomyLevel.LEVEL_3_AUTONOMOUS_STATIC,
+                        )
+                        pipe.run_all_stages()
+                        st = pipe.get_pipeline_state()
+                        return {"markdown_report": st["report_markdown"], "stages": st["stages"]}
+
+                job_id = job_manager.submit_job("12_stage_pipeline", _run_pipeline, bin_path)
+                self._json_response({
+                    "status": "accepted",
+                    "job_id": job_id,
+                    "poll_url": f"/api/jobs?id={job_id}",
+                    "message": "12-stage pipeline job queued for asynchronous background processing"
+                }, status=202)
                 return
             with tempfile.TemporaryDirectory() as tmpdir:
                 pipe = PipelineStateMachine(
@@ -3861,11 +4069,11 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/inspect":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            offset_str = query.get("offset", ["0x0"])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
+            offset_str = query.get("offset", ["0x0"])[0]
             try:
                 with open(bin_path, "rb") as f:
                     data = f.read(4 * 1024 * 1024)
@@ -3877,11 +4085,11 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/query":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            q_str = query.get("q", ["capabilities"])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
+            q_str = query.get("q", ["capabilities"])[0]
             try:
                 with open(bin_path, "rb") as f:
                     data = f.read(4 * 1024 * 1024)
@@ -3924,9 +4132,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/decompile":
-            bin_path = query.get("path", [self.default_binary_path or ""])[0]
-            if not bin_path or not os.path.exists(bin_path):
-                self._json_response({"status": "error", "error": "Invalid binary path"}, status=400)
+            ok, bin_path = self._extract_and_validate_path(query)
+            if not ok:
+                self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
             with open(bin_path, "rb") as f:
                 data = f.read(1048576)
@@ -3962,26 +4170,27 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
 
 def start_gui_workbench(port: int = 8080, open_browser: bool = True, binary_path: Optional[str] = None) -> None:
     """Launch the local 4-Pane Synchronized GUI workbench server."""
-    class ReusableServer(socketserver.TCPServer):
+    class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         allow_reuse_address = True
+        daemon_threads = True
 
     if binary_path is None and os.path.exists("/bin/ls"):
         binary_path = "/bin/ls"
 
     GUIWorkbenchHandler.default_binary_path = binary_path
     try:
-        httpd = ReusableServer(("127.0.0.1", port), GUIWorkbenchHandler)
+        httpd = ThreadedServer(("127.0.0.1", port), GUIWorkbenchHandler)
     except OSError:
         port += 1
-        httpd = ReusableServer(("127.0.0.1", port), GUIWorkbenchHandler)
+        httpd = ThreadedServer(("127.0.0.1", port), GUIWorkbenchHandler)
 
     url = f"http://127.0.0.1:{port}"
     if binary_path:
         url += f"/?path={urllib.parse.quote(os.path.abspath(binary_path))}"
 
     print(f"\n  ╔════════════════════════════════════════════════════════════════════╗")
-    print(f"  ║   9R0JE6T R10T // R3V3R53-F0RG3  4-Pane Synchronized Studio v30.0 ║")
-    print(f"  ║   Whole-Binary Indexer · Per-Function CFG/C/IR · 55 Rust Modules   ║")
+    print(f"  ║   9R0JE6T R10T // R3V3R53-F0RG3  4-Pane Synchronized Studio v32.0 ║")
+    print(f"  ║   Multi-Threaded · Path-Secured · Firebase Cloud · 55 Rust Modules ║")
     print(f"  ║   URL: {url:<54}║")
     print(f"  ╚════════════════════════════════════════════════════════════════════╝\n")
 

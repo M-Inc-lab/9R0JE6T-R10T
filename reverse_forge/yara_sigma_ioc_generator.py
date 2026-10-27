@@ -223,7 +223,7 @@ class YaraSigmaIOCGenerator:
             ],
         }
 
-        return DetectionArtifactsBundle(
+        bundle = DetectionArtifactsBundle(
             rule_identifier=rule_name,
             binary_sha256=sha256,
             binary_format=fmt,
@@ -233,3 +233,38 @@ class YaraSigmaIOCGenerator:
             high_specificity_strings=selected_strs,
             masked_opcode_pattern=op_hex,
         )
+
+        ok, validation_errs = self.validate_bundle_quality(bundle)
+        if not ok:
+            # Attach validation warnings into bundle metadata
+            bundle.stix21_bundle_json["validation_warnings"] = validation_errs
+
+        return bundle
+
+    @classmethod
+    def validate_bundle_quality(cls, bundle: DetectionArtifactsBundle) -> Tuple[bool, List[str]]:
+        """Rigorous syntax and semantic quality gate for generated detection artifacts."""
+        errors: List[str] = []
+
+        # 1. YARA Syntax Validation
+        yara = bundle.yara_rule_source.strip()
+        if not yara.startswith("rule "):
+            errors.append("YARA rule must begin with 'rule <identifier>' header")
+        if yara.count("{") != yara.count("}") or "condition:" not in yara:
+            errors.append("YARA rule has unbalanced braces or missing 'condition:' section")
+
+        # 2. SIGMA Structure Validation
+        sigma = bundle.sigma_rule_yaml
+        required_sigma_keys = ("title:", "logsource:", "detection:", "condition:", "level:")
+        for rk in required_sigma_keys:
+            if rk not in sigma:
+                errors.append(f"SIGMA YAML missing required top-level attribute: {rk}")
+
+        # 3. STIX 2.1 Specification Validation
+        stix = bundle.stix21_bundle_json
+        if not isinstance(stix, dict) or stix.get("type") != "bundle":
+            errors.append("STIX artifact must be a JSON object with type 'bundle'")
+        if not isinstance(stix.get("objects"), list) or len(stix["objects"]) == 0:
+            errors.append("STIX bundle must contain at least one valid SDO object")
+
+        return len(errors) == 0, errors

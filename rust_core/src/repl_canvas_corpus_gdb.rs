@@ -51,7 +51,7 @@ pub struct ViewportFrameRust {
 pub fn render_quadtree_viewport_rust(
     nodes: &[GraphNodeBoxRust],
     vp: ViewportBoxRust,
-) -> structViewportFrameRust {
+) -> ViewportFrameRust {
     let lod = if vp.zoom_scale >= 0.75 {
         "LOD_HIGH_FULL_DISASM"
     } else if vp.zoom_scale >= 0.35 {
@@ -77,7 +77,7 @@ pub fn render_quadtree_viewport_rust(
         }
     }
 
-    structViewportFrameRust {
+    ViewportFrameRust {
         lod_mode: lod,
         total_nodes: nodes.len(),
         visible_culled_nodes: visible,

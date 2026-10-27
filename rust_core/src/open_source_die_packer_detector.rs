@@ -10,7 +10,7 @@
 //!     (`.vmp0`/`.vmp1`), Themida (`.themida`), ConfuserEx, Go (`Go build ID:`), Rust (`rustc `),
 //!     GCC, Clang, and MSVC toolchains (`scan_die_compiler_packer_signatures`).
 
-use crate::scanner::shannon_entropy;
+use crate::parsers::compute_shannon_entropy as shannon_entropy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DieDetectionHit {

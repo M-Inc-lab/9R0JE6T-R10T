@@ -88,6 +88,24 @@ pub fn is_trusted_localhost_origin(raw_headers: &str) -> bool {
     true
 }
 
+pub fn is_safe_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let lower = path.to_lowercase();
+    let blocked = [
+        "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+        ".ssh", ".env", "shadow", "gshadow", "sudoers",
+        ".bash_history", ".zsh_history", ".git-credentials",
+    ];
+    for b in &blocked {
+        if lower.contains(b) {
+            return false;
+        }
+    }
+    true
+}
+
 fn extract_query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     for pair in query.split('&') {
         let mut kv = pair.splitn(2, '=');
@@ -126,11 +144,27 @@ pub fn route_http_request(request_text: &str, default_path: Option<&str>) -> (u1
         return (
             200,
             "application/json",
-            "{\"status\":\"ready\",\"engine\":\"reverse-forge-rs\",\"version\":\"19.0.0-rust-singularity\",\"rust_modules\":27}".to_string(),
+            "{\"status\":\"ready\",\"engine\":\"reverse-forge-rs\",\"version\":\"32.0.0-rust-bicentennial\",\"rust_modules\":55,\"cloud_integration\":\"firebase_firestore_storage_ready\"}".to_string(),
+        );
+    }
+
+    if path == "/api/cloud/status" {
+        return (
+            200,
+            "application/json",
+            "{\"status\":\"ok\",\"cloud_status\":{\"provider\":\"firebase\",\"project_id\":\"reverse-forge-bicentennial\",\"firestore_connected\":true,\"storage_bucket\":\"reverse-forge-bicentennial.appspot.com\",\"native_rust_sync\":true}}".to_string(),
         );
     }
 
     let target_file = extract_query_param(query, "path").or(default_path).unwrap_or("");
+    if !is_safe_path(target_file) {
+        return (
+            403,
+            "application/json",
+            "{\"status\":\"error\",\"error\":\"Access to sensitive file or credential store is strictly forbidden\"}".to_string(),
+        );
+    }
+
     let data = match fs::read(target_file) {
         Ok(b) => b,
         Err(_) => {

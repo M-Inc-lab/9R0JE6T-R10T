@@ -11,8 +11,8 @@
 //!   4. YARA Aho-Corasick $O(N)$ Automaton + Galileo CFI/CET Hardening Audit
 //!      (`open_source_yara_ahocorasick_capa.rs` + `open_source_galileo_cfi_gadget_auditor.rs`)
 
-use crate::parsers::detect_and_parse;
-use crate::pcode_ssa::decompile_bytes_via_ghidra_ssa;
+use crate::parsers::parse_binary_zero_copy;
+use crate::disasm::lift_bytes_to_pcode_blocks;
 use crate::open_source_die_packer_detector::scan_die_compiler_packer_signatures;
 use crate::open_source_rizin_esil::lift_and_exec_esil_x86_64;
 use crate::open_source_angr_vex_claripy::lift_x86_64_to_vex_irsb;
@@ -55,11 +55,13 @@ impl OmniMasterAuditDossier {
 
 /// Execute the complete 200-Phase Native Rust Master Orchestrator over `binary_bytes`
 pub fn run_omni_rust_master_audit(binary_bytes: &[u8]) -> OmniMasterAuditDossier {
-    let header = detect_and_parse(binary_bytes);
+    let summary = parse_binary_zero_copy(binary_bytes);
     let die_rep = scan_die_compiler_packer_signatures(binary_bytes, 0);
-    let ssa_fn = decompile_bytes_via_ghidra_ssa("entry_0x401000", binary_bytes, header.entry_point, 16);
-    let (_, esil_steps) = lift_and_exec_esil_x86_64(binary_bytes, header.entry_point, 16);
-    let vex_irsb = lift_x86_64_to_vex_irsb(binary_bytes, header.entry_point, 16);
+    let code_slice = &binary_bytes[..binary_bytes.len().min(512)];
+    let blocks = lift_bytes_to_pcode_blocks(code_slice, summary.entry_point_va);
+    let ssa_ops_count: usize = blocks.iter().map(|b| b.ops.len()).sum();
+    let (_, esil_steps) = lift_and_exec_esil_x86_64(code_slice, summary.entry_point_va, 16);
+    let vex_irsb = lift_x86_64_to_vex_irsb(code_slice, summary.entry_point_va, 16);
 
     let mut ac = YaraAhoCorasickAutomaton::new();
     ac.add_pattern("Container_Header", "$mz", b"MZ");
@@ -71,12 +73,12 @@ pub fn run_omni_rust_master_audit(binary_bytes: &[u8]) -> OmniMasterAuditDossier
 
     OmniMasterAuditDossier {
         version: "26.0.0-rust-bicentennial",
-        format: header.format,
-        arch: header.arch,
-        entry_point: header.entry_point,
+        format: summary.format.to_string(),
+        arch: summary.architecture.to_string(),
+        entry_point: summary.entry_point_va,
         die_is_packed: die_rep.is_packed,
         die_detections: die_rep.detections.len(),
-        ghidra_ssa_ops: ssa_fn.ssa_ops.len(),
+        ghidra_ssa_ops: ssa_ops_count,
         rizin_esil_steps: esil_steps.len(),
         angr_vex_stmts: vex_irsb.stmts.len(),
         yara_ac_hits: yara_hits.len(),

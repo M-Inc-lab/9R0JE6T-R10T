@@ -10,7 +10,7 @@
 //!       arrays (`uint8_t _pad_0x04[4]`) to produce compilable C struct declarations.
 
 use std::collections::BTreeMap;
-use crate::pcode_ssa::{PcodeOp, PcodeOpCode, VarnodeSpace};
+use crate::pcode_ssa::{AddrSpace, PcodeOp, PcodeOpCode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferredStructField {
@@ -68,23 +68,23 @@ fn size_to_c_type(size: usize, is_ptr: bool) -> &'static str {
 /// Infer C `struct` and `vtable` layouts from a stream of Ghidra `PcodeOp` instructions
 pub fn synthesize_c_structs_from_pcode(ops: &[PcodeOp]) -> Vec<InferredCStruct> {
     // Track temporary varnode -> (base_reg_name, constant_offset)
-    let mut ptr_temps: BTreeMap<(VarnodeSpace, u64), (String, u64)> = BTreeMap::new();
+    let mut ptr_temps: BTreeMap<(AddrSpace, u64), (String, u64)> = BTreeMap::new();
     // Map base_reg -> (offset -> (size, is_ptr, is_vtable))
     let mut struct_map: BTreeMap<String, BTreeMap<u64, (usize, bool, bool)>> = BTreeMap::new();
 
     for op in ops {
         match op.opcode {
-            PcodeOpCode::IntAdd | PcodeOpCode::PtrAdd | PcodeOpCode::PtrSub => {
+            PcodeOpCode::IntAdd | PcodeOpCode::IntSub => {
                 if op.inputs.len() >= 2 {
                     let base = &op.inputs[0];
                     let disp = &op.inputs[1];
-                    if base.space == VarnodeSpace::Register && disp.space == VarnodeSpace::Const {
-                        if base.name != "rsp" && base.name != "rbp" && base.name != "sp" {
+                    if base.space == AddrSpace::Register && disp.space == AddrSpace::Const {
+                        if base.reg_name != "rsp" && base.reg_name != "rbp" && base.reg_name != "sp" {
                             if let Some(out) = &op.output {
-                                ptr_temps.insert((out.space, out.offset), (base.name.clone(), disp.offset));
+                                ptr_temps.insert((out.space, out.offset), (base.reg_name.to_string(), disp.offset));
                             }
                             struct_map
-                                .entry(base.name.clone())
+                                .entry(base.reg_name.to_string())
                                 .or_default()
                                 .entry(disp.offset)
                                 .or_insert((8, false, false));
@@ -94,15 +94,15 @@ pub fn synthesize_c_structs_from_pcode(ops: &[PcodeOp]) -> Vec<InferredCStruct> 
             }
             PcodeOpCode::Load => {
                 if let Some(addr_vn) = op.inputs.last() {
-                    let sz = op.output.as_ref().map(|o| o.size).unwrap_or(8);
+                    let sz = op.output.as_ref().map(|o| o.size as usize).unwrap_or(8);
                     if let Some((base_name, off)) = ptr_temps.get(&(addr_vn.space, addr_vn.offset)).cloned() {
                         struct_map
                             .entry(base_name)
                             .or_default()
                             .insert(off, (sz, sz == 8, false));
-                    } else if addr_vn.space == VarnodeSpace::Register && addr_vn.name != "rsp" && addr_vn.name != "rbp" {
+                    } else if addr_vn.space == AddrSpace::Register && addr_vn.reg_name != "rsp" && addr_vn.reg_name != "rbp" {
                         struct_map
-                            .entry(addr_vn.name.clone())
+                            .entry(addr_vn.reg_name.to_string())
                             .or_default()
                             .entry(0)
                             .or_insert((sz, sz == 8, false));
@@ -117,7 +117,7 @@ pub fn synthesize_c_structs_from_pcode(ops: &[PcodeOp]) -> Vec<InferredCStruct> 
                         struct_map
                             .entry(base_name)
                             .or_default()
-                            .insert(off, (val_vn.size, false, false));
+                            .insert(off, (val_vn.size as usize, false, false));
                     }
                 }
             }

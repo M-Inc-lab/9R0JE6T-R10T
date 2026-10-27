@@ -67,7 +67,7 @@ def test_gui_workbench_server_rest_api():
             assert resp.status == 200
             data = json.loads(resp.read().decode("utf-8"))
             assert data["status"] == "ready"
-            assert data["version"] in ("6.0.0-quantum", "7.0.0-singularity", "8.0.0-omniscient", "9.0.0-sovereign", "10.0.0-zenith", "11.0.0-eternal", "12.0.0-apex-omni", "13.0.0-vanguard", "14.0.0-transcendent", "15.0.0-rust-titan", "16.0.0-omni-rust", "17.0.0-rust-dominion", "18.0.0-rust-sovereign", "19.0.0-rust-singularity", "20.0.0-rust-omega", "21.0.0-rust-apex", "22.0.0-rust-eternal", "23.0.0-rust-zenith", "24.0.0-rust-omni-complete", "25.0.0-rust-transcendent", "26.0.0-rust-bicentennial")
+            assert data["version"] in ("6.0.0-quantum", "7.0.0-singularity", "8.0.0-omniscient", "9.0.0-sovereign", "10.0.0-zenith", "11.0.0-eternal", "12.0.0-apex-omni", "13.0.0-vanguard", "14.0.0-transcendent", "15.0.0-rust-titan", "16.0.0-omni-rust", "17.0.0-rust-dominion", "18.0.0-rust-sovereign", "19.0.0-rust-singularity", "20.0.0-rust-omega", "21.0.0-rust-apex", "22.0.0-rust-eternal", "23.0.0-rust-zenith", "24.0.0-rust-omni-complete", "25.0.0-rust-transcendent", "26.0.0-rust-bicentennial", "32.0.0-rust-bicentennial")
             assert data["active_engines"] >= 45
 
         # Test 3: GET /api/load on a temporary binary

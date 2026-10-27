@@ -1,3 +1,18 @@
+//! R3V3R53//F0RG3 — Complete 16-Category Native Rust Library Root & C-ABI FFI Bridge (`lib.rs`)
+//! Unifies all 16 categories of the Open-Source Reverse Engineering Toolkit into a single
+//! zero-copy, low-memory (`<1.5 MB` RSS) Native Rust crate (`reverse_forge_core`):
+//!   - Cat 1: `pcode_ssa` & `disasm` (Ghidra SLEIGH P-Code, Heritage SSA, RuleAction, Rizin/RetDec structuring)
+//!   - Cat 2 & 3: `visor` (x64dbg/GDB-RSP/Frida/Unicorn Under-Constrained Force-Execution Micro-Visor)
+//!   - Cat 4: `symbolic_angr_smt` (angr/KLEE/Triton 64-bit Bit-Vector Domain & CWE-190 Solver)
+//!   - Cat 5 & 14: `scanner` (CAPA, YARA, FLOSS, FLIRT CRC-16, Wildcard Signature Scanner)
+//!   - Cat 6, 7, 8, 9: `bytecode_jvm_dex_clr_wasm` (JADX Android DEX, Recaf/CFR JVM `.class`, ILSpy/de4dot `.NET`, WABT `WASM`)
+//!   - Cat 10: `firmware_binwalk` (Binwalk/FACT SquashFS/CramFS/uImage/DTB Carver & Cortex-M Vector Base)
+//!   - Cat 11: `network_pcap_netzob` (Wireshark/Zeek PCAP Dissector & Netzob Protocol Grammar Inferencer)
+//!   - Cat 12: `parsers` & `checksec_cfi_audit` (LIEF/DIE/PE-bear Zero-Copy Parsers & checksec/CET/CFI Auditor)
+//!   - Cat 13: `diff_diaphora` (Diaphora/BinDiff Small-Prime-Product & Normalized Opcode Binary Differ)
+//!   - Cat 15: `memory_volatility_pesieve` (Volatility 3/PE-sieve Minidump, Hollowing & In-Memory PE Unmapper)
+//!   - Cat 16: `imhex_patcher` (ImHex `.hexpat` Struct Pattern Evaluator & Keystone/LIEF Micro-Patcher)
+
 pub mod open_source_die_packer_detector;
 pub mod open_source_rr_panda_timetravel;
 pub mod open_source_qbdi_dynamorio_trace;
@@ -29,20 +44,6 @@ pub mod open_source_jadx_ilspy_ast;
 pub mod web_studio_server;
 pub mod repl_canvas_corpus_gdb;
 pub mod open_source_sleigh_zydis_capstone;
-//! R3V3R53//F0RG3 — Complete 16-Category Native Rust Library Root & C-ABI FFI Bridge (`lib.rs`)
-//! Unifies all 16 categories of the Open-Source Reverse Engineering Toolkit into a single
-//! zero-copy, low-memory (`<1.5 MB` RSS) Native Rust crate (`reverse_forge_core`):
-//!   - Cat 1: `pcode_ssa` & `disasm` (Ghidra SLEIGH P-Code, Heritage SSA, RuleAction, Rizin/RetDec structuring)
-//!   - Cat 2 & 3: `visor` (x64dbg/GDB-RSP/Frida/Unicorn Under-Constrained Force-Execution Micro-Visor)
-//!   - Cat 4: `symbolic_angr_smt` (angr/KLEE/Triton 64-bit Bit-Vector Domain & CWE-190 Solver)
-//!   - Cat 5 & 14: `scanner` (CAPA, YARA, FLOSS, FLIRT CRC-16, Wildcard Signature Scanner)
-//!   - Cat 6, 7, 8, 9: `bytecode_jvm_dex_clr_wasm` (JADX Android DEX, Recaf/CFR JVM `.class`, ILSpy/de4dot `.NET`, WABT `WASM`)
-//!   - Cat 10: `firmware_binwalk` (Binwalk/FACT SquashFS/CramFS/uImage/DTB Carver & Cortex-M Vector Base)
-//!   - Cat 11: `network_pcap_netzob` (Wireshark/Zeek PCAP Dissector & Netzob Protocol Grammar Inferencer)
-//!   - Cat 12: `parsers` & `checksec_cfi_audit` (LIEF/DIE/PE-bear Zero-Copy Parsers & checksec/CET/CFI Auditor)
-//!   - Cat 13: `diff_diaphora` (Diaphora/BinDiff Small-Prime-Product & Normalized Opcode Binary Differ)
-//!   - Cat 15: `memory_volatility_pesieve` (Volatility 3/PE-sieve Minidump, Hollowing & In-Memory PE Unmapper)
-//!   - Cat 16: `imhex_patcher` (ImHex `.hexpat` Struct Pattern Evaluator & Keystone/LIEF Micro-Patcher)
 
 pub mod bytecode_jvm_dex_clr_wasm;
 pub mod checksec_cfi_audit;
