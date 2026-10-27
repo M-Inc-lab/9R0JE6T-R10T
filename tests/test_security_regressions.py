@@ -298,5 +298,116 @@ class SecurityRegressionTests(unittest.TestCase):
                 self.assertEqual(len(res["analysis"]["dangerous_sink_xrefs"]), 1)
 
 
+class TestHardenedScopeLedgerAndAuthentication(unittest.TestCase):
+    """Regression tests for Section 3: Hardened ScopeLedger and Authentication Fail-Closed Controls."""
+
+    def test_scope_ledger_rejects_path_traversal_and_null_bytes(self):
+        from reverse_forge.provenance import ScopeLedger, ActionPermission
+        ledger = ScopeLedger(allowed_patterns=["target.bin"])
+        self.assertFalse(ledger.is_authorized("../target.bin"))
+        self.assertFalse(ledger.is_authorized("sub/../../target.bin"))
+        self.assertFalse(ledger.is_authorized("target.bin\x00evil"))
+
+    def test_scope_ledger_canonical_real_path_and_symlink_defense(self):
+        from reverse_forge.provenance import ScopeLedger, ActionPermission
+        with tempfile.TemporaryDirectory() as tmpdir:
+            allowed_dir = os.path.join(tmpdir, "allowed")
+            forbidden_dir = os.path.join(tmpdir, "forbidden")
+            os.makedirs(allowed_dir)
+            os.makedirs(forbidden_dir)
+
+            secret_file = os.path.join(forbidden_dir, "secret.bin")
+            with open(secret_file, "wb") as f:
+                f.write(b"SECRET_DATA")
+
+            # Create a symlink inside allowed_dir pointing to secret_file in forbidden_dir
+            symlink_file = os.path.join(allowed_dir, "sneaky_symlink.bin")
+            os.symlink(secret_file, symlink_file)
+
+            ledger = ScopeLedger(allowed_paths=[allowed_dir])
+            # The symlink resolves outside allowed_dir, so it MUST be rejected
+            self.assertFalse(ledger.is_authorized(symlink_file))
+
+            # Regular file inside allowed_dir is authorized
+            legit_file = os.path.join(allowed_dir, "legit.bin")
+            with open(legit_file, "wb") as f:
+                f.write(b"LEGIT_DATA")
+            self.assertTrue(ledger.is_authorized(legit_file))
+
+    def test_scope_ledger_action_permission_segregation(self):
+        from reverse_forge.provenance import ScopeLedger, ActionPermission
+        ledger = ScopeLedger(
+            allowed_patterns=["target.bin"],
+            default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS],
+            allowed_actions={"target.bin": [ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS]},
+        )
+        # Static and Hash permissions permitted
+        self.assertTrue(ledger.is_authorized("target.bin", ActionPermission.READ_HASH))
+        self.assertTrue(ledger.is_authorized("target.bin", ActionPermission.STATIC_ANALYSIS))
+
+        # Dynamic Sandbox and Network Access must be denied by default
+        self.assertFalse(ledger.is_authorized("target.bin", ActionPermission.DYNAMIC_SANDBOX))
+        self.assertFalse(ledger.is_authorized("target.bin", ActionPermission.NETWORK_ACCESS))
+
+    def test_scope_ledger_empty_policy_fails_closed(self):
+        from reverse_forge.provenance import ScopeLedger
+        ledger = ScopeLedger()
+        self.assertFalse(ledger.is_authorized("any_file.bin"))
+
+    def test_firebase_auth_rejects_missing_token_in_production(self):
+        from reverse_forge.firebase_sync import FirebaseAuthManager
+        with patch.dict(os.environ, {"REVERSE_FORGE_ENV": "production", "FIREBASE_SERVICE_ACCOUNT_KEY": ""}):
+            auth = FirebaseAuthManager()
+            self.assertIsNone(auth.verify_bearer_token(None))
+            self.assertIsNone(auth.verify_bearer_token(""))
+
+    def test_firebase_auth_rejects_expired_and_not_before_tokens(self):
+        from reverse_forge.firebase_sync import FirebaseAuthManager
+        import base64
+        import json
+        import time
+
+        auth = FirebaseAuthManager()
+        header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode("utf-8").rstrip("=")
+
+        # Expired token (exp in past)
+        exp_payload = base64.urlsafe_b64encode(
+            json.dumps({"sub": "user_exp", "exp": time.time() - 3600}).encode("utf-8")
+        ).decode("utf-8").rstrip("=")
+        expired_jwt = f"{header}.{exp_payload}."
+        self.assertIsNone(auth.verify_bearer_token(f"Bearer {expired_jwt}"))
+
+        # Not-before token (nbf in future)
+        nbf_payload = base64.urlsafe_b64encode(
+            json.dumps({"sub": "user_nbf", "nbf": time.time() + 3600}).encode("utf-8")
+        ).decode("utf-8").rstrip("=")
+        nbf_jwt = f"{header}.{nbf_payload}."
+        self.assertIsNone(auth.verify_bearer_token(f"Bearer {nbf_jwt}"))
+
+    def test_firebase_auth_rejects_unsigned_jwt_in_production(self):
+        from reverse_forge.firebase_sync import FirebaseAuthManager
+        import base64
+        import json
+
+        with patch.dict(os.environ, {"REVERSE_FORGE_ENV": "production", "FIREBASE_SERVICE_ACCOUNT_KEY": "valid_key"}):
+            auth = FirebaseAuthManager()
+            header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode("utf-8").rstrip("=")
+            payload = base64.urlsafe_b64encode(json.dumps({"sub": "user_hacker"}).encode("utf-8")).decode("utf-8").rstrip("=")
+            unsigned_jwt = f"{header}.{payload}."
+            self.assertIsNone(auth.verify_bearer_token(f"Bearer {unsigned_jwt}"))
+
+    def test_pipeline_default_scope_ledger_is_strictly_bounded(self):
+        from reverse_forge.pipeline import ReverseForgePipeline
+        from reverse_forge.provenance import ActionPermission
+        with tempfile.NamedTemporaryFile(suffix=".bin") as tf:
+            tf.write(b"\x7fELF" + b"\x00" * 64)
+            tf.flush()
+            pipeline = ReverseForgePipeline(artifact_path=tf.name)
+            # Pipeline's default scope ledger must be strictly bounded to tf.name
+            self.assertFalse(pipeline.scope_ledger.allow_all)
+            self.assertTrue(pipeline.scope_ledger.is_authorized(tf.name, ActionPermission.READ_HASH))
+            self.assertFalse(pipeline.scope_ledger.is_authorized("/etc/passwd", ActionPermission.READ_HASH))
+
+
 if __name__ == "__main__":
     unittest.main()

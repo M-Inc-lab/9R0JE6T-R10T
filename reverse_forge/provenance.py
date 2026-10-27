@@ -8,9 +8,11 @@ import json
 import os
 import shutil
 import stat
+import fnmatch
+from enum import Enum
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Union
 
 
 @dataclass
@@ -28,33 +30,130 @@ class ArtifactProvenance:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class ScopeLedger:
-    """Enforces authorization boundaries and rules of engagement."""
+class ActionPermission(str, Enum):
+    """Fine-grained permission classes for reverse-engineering actions (§03.2)."""
+    READ_HASH = "read_hash"
+    STATIC_ANALYSIS = "static_analysis"
+    DYNAMIC_SANDBOX = "dynamic_sandbox"
+    NETWORK_ACCESS = "network_access"
+    MODIFY_ARTIFACT = "modify_artifact"
+    EXTERNAL_SERVICE = "external_service"
 
-    def __init__(self, allowed_patterns: Optional[List[str]] = None, allow_all: bool = False):
+
+class ScopeLedger:
+    """
+    Enforces authorization boundaries, canonical resource resolution, and rules of engagement.
+    Implements fail-closed security (§01, §03.2).
+    """
+
+    def __init__(
+        self,
+        allowed_patterns: Optional[List[str]] = None,
+        allowed_paths: Optional[List[str]] = None,
+        allowed_actions: Optional[Dict[str, List[ActionPermission]]] = None,
+        default_actions: Optional[List[ActionPermission]] = None,
+        allow_all: bool = False,
+    ):
         self.allowed_patterns = allowed_patterns or []
+        self.allowed_paths = [os.path.realpath(os.path.abspath(p)) for p in (allowed_paths or [])]
         self.allow_all = allow_all
+        self.allowed_actions = allowed_actions or {}
+        self.default_actions = default_actions or [
+            ActionPermission.READ_HASH,
+            ActionPermission.STATIC_ANALYSIS,
+        ]
         self.audit_log: List[Dict[str, Any]] = []
 
-    def is_authorized(self, target_identifier: str) -> bool:
-        if self.allow_all:
-            authorized = True
-        elif not self.allowed_patterns:
-            authorized = False
-        else:
-            normalized = os.path.basename(target_identifier).lower()
-            authorized = any(
-                pat.lower() in normalized or normalized.endswith(pat.lower())
-                for pat in self.allowed_patterns
-            )
+    def is_authorized(
+        self,
+        target_identifier: str,
+        action: Union[ActionPermission, str] = ActionPermission.READ_HASH,
+    ) -> bool:
+        """
+        Verify if the given target identifier and action are strictly authorized.
+        Canonicalizes paths, prevents directory traversal / symlink escapes,
+        and enforces fine-grained permission gates.
+        """
+        if isinstance(action, str):
+            try:
+                action = ActionPermission(action)
+            except ValueError:
+                action = ActionPermission.READ_HASH
 
+        # 1. Reject path traversal indicators and null bytes immediately
+        if "\x00" in target_identifier or "../" in target_identifier or "..\\" in target_identifier:
+            self._record_audit(target_identifier, action, authorized=False, reason="Path traversal payload rejected")
+            return False
+
+        if self.allow_all:
+            self._record_audit(target_identifier, action, authorized=True, reason="Allow-all override active")
+            return True
+
+        # If no patterns or paths are configured, fail closed
+        if not self.allowed_patterns and not self.allowed_paths:
+            self._record_audit(target_identifier, action, authorized=False, reason="Empty scope policy (fail-closed)")
+            return False
+
+        # 2. Canonical path check
+        target_real: Optional[str] = None
+        if os.path.exists(target_identifier):
+            target_real = os.path.realpath(os.path.abspath(target_identifier))
+        elif os.path.isabs(target_identifier):
+            target_real = os.path.realpath(target_identifier)
+
+        path_matched = False
+        if target_real and self.allowed_paths:
+            for allowed_p in self.allowed_paths:
+                # Target must match exactly or reside within an allowed directory tree
+                if target_real == allowed_p or target_real.startswith(allowed_p.rstrip(os.sep) + os.sep):
+                    path_matched = True
+                    break
+
+        # 3. Pattern / Identifier check (exact match or fnmatch over canonical basename)
+        pattern_matched = False
+        target_base = os.path.basename(target_identifier)
+        for pat in self.allowed_patterns:
+            pat_clean = pat.strip()
+            if target_base.lower() == pat_clean.lower() or fnmatch.fnmatch(target_base.lower(), pat_clean.lower()):
+                pattern_matched = True
+                break
+
+        in_scope = path_matched or pattern_matched
+        if not in_scope:
+            self._record_audit(target_identifier, action, authorized=False, reason="Target not in scope")
+            return False
+
+        # 4. Action-specific permission enforcement
+        # Sensitive actions (DYNAMIC_SANDBOX, NETWORK_ACCESS, MODIFY_ARTIFACT) require explicit grant
+        permitted_actions = self.allowed_actions.get(target_base, self.default_actions)
+        if action not in permitted_actions:
+            self._record_audit(
+                target_identifier,
+                action,
+                authorized=False,
+                reason=f"Action '{action.value}' not granted for target",
+            )
+            return False
+
+        self._record_audit(target_identifier, action, authorized=True, reason="Authorized")
+        return True
+
+    def _record_audit(
+        self,
+        target_identifier: str,
+        action: ActionPermission,
+        authorized: bool,
+        reason: str,
+    ) -> None:
         self.audit_log.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "target": target_identifier,
+            "action": action.value if hasattr(action, "value") else str(action),
             "authorized": authorized,
+            "reason": reason,
             "rules": self.allowed_patterns,
+            "allowed_paths": self.allowed_paths,
         })
-        return authorized
 
 
 class ProvenanceManager:

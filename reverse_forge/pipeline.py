@@ -16,7 +16,7 @@ from reverse_forge.elf_analyzer import ELFAnalyzer
 from reverse_forge.ghidra_analyzer import GhidraHeadlessAnalyzer
 from reverse_forge.macho_analyzer import MachOAnalyzer
 from reverse_forge.pe_analyzer import PEAnalyzer
-from reverse_forge.provenance import ArtifactProvenance, ProvenanceManager, ScopeLedger
+from reverse_forge.provenance import ActionPermission, ArtifactProvenance, ProvenanceManager, ScopeLedger
 from reverse_forge.reporter import Finding, ReportGenerator
 from reverse_forge.behavioral_engine import BehavioralTelemetryEngine
 
@@ -94,7 +94,17 @@ class PipelineStateMachine:
     ):
         self.artifact_path = os.path.abspath(artifact_path)
         self.autonomy_level = autonomy_level
-        self.scope_ledger = scope_ledger or ScopeLedger(allow_all=True)
+        if scope_ledger is not None:
+            self.scope_ledger = scope_ledger
+        else:
+            # Default to restricted scope locked strictly to the specific canonical artifact path (fail-closed)
+            target_real = os.path.realpath(self.artifact_path)
+            self.scope_ledger = ScopeLedger(
+                allowed_patterns=[os.path.basename(self.artifact_path)],
+                allowed_paths=[target_real, os.path.dirname(target_real)],
+                default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS],
+                allow_all=False,
+            )
         self.provenance_mgr = ProvenanceManager(workspace_dir)
         self.hil_callback = hil_callback
         self.loop_guard = AntiLoopGuard()
@@ -663,3 +673,8 @@ class PipelineStateMachine:
             "report_json": self.report_generator.to_json() if self.report_generator else {},
             "report_markdown": self.report_generator.to_markdown() if self.report_generator else "",
         }
+
+
+# Canonical export alias
+ReverseForgePipeline = PipelineStateMachine
+

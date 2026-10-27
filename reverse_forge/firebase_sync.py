@@ -107,26 +107,44 @@ class FirestoreJobDocument:
 
 
 class FirebaseAuthManager:
-    """Handles token validation, JWT decoding, and RBAC authorization."""
+    """Handles token validation, JWT decoding, and RBAC authorization with fail-closed security (§03.1)."""
 
-    def __init__(self, project_id: Optional[str] = None):
+    def __init__(
+        self,
+        project_id: Optional[str] = None,
+        expected_issuer: Optional[str] = None,
+        expected_audience: Optional[str] = None,
+    ):
         self.project_id = project_id or os.environ.get("FIREBASE_PROJECT_ID", "reverse-forge-local")
-        self.mock_mode = not bool(os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY"))
+        self.expected_issuer = expected_issuer or os.environ.get("FIREBASE_EXPECTED_ISSUER")
+        self.expected_audience = expected_audience or os.environ.get("FIREBASE_EXPECTED_AUDIENCE", self.project_id)
+        
+        env_mode = os.environ.get("REVERSE_FORGE_ENV", "").lower()
+        self.is_production = env_mode == "production"
+        has_key = bool(os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY"))
+
+        if self.is_production and not has_key:
+            logger.error("PRODUCTION CONFIGURATION ERROR: FIREBASE_SERVICE_ACCOUNT_KEY missing in production environment!")
+            self.mock_mode = False
+        else:
+            self.mock_mode = not has_key
 
     def verify_bearer_token(self, auth_header: Optional[str]) -> Optional[AuthUserContext]:
         """
         Verify the HTTP Authorization: Bearer <token> header.
-        In local/offline mode, validates structured JWT or provides developer fallback.
+        Enforces cryptographic claims validation, expiration, and fail-closed security (§03.1).
         """
+        # Missing Authorization header
         if not auth_header:
-            if self.mock_mode:
-                return AuthUserContext(
-                    uid="dev_local_user",
-                    email="architect@reverse-forge.local",
-                    role=UserRole.LEAD_ARCHITECT,
-                    tenant_id="local_lab",
-                )
-            return None
+            if self.is_production or not self.mock_mode:
+                return None
+            # Dev mock fallback: allowed only in local non-production environment
+            return AuthUserContext(
+                uid="dev_local_user",
+                email="architect@reverse-forge.local",
+                role=UserRole.LEAD_ARCHITECT,
+                tenant_id="local_lab",
+            )
 
         parts = auth_header.strip().split()
         if len(parts) != 2 or parts[0].lower() != "bearer":
@@ -134,24 +152,56 @@ class FirebaseAuthManager:
 
         token = parts[1]
         try:
-            # Lightweight safe JWT header and payload unpack
             jwt_parts = token.split(".")
-            if len(jwt_parts) >= 2:
-                payload_json = base64.urlsafe_b64decode(jwt_parts[1] + "==").decode("utf-8")
-                claims = json.loads(payload_json)
-                role_str = claims.get("role", "ANALYST").upper()
-                role = getattr(UserRole, role_str, UserRole.ANALYST)
-                return AuthUserContext(
-                    uid=claims.get("sub", claims.get("user_id", "anonymous")),
-                    email=claims.get("email", "operator@reverse-forge.cloud"),
-                    role=role,
-                    tenant_id=claims.get("tenant_id", "default_tenant"),
-                    token_claims=claims,
-                )
+            if len(jwt_parts) < 2 or len(jwt_parts) > 3:
+                return None
+
+            # In production, require standard 3-part signed JWT
+            if self.is_production and (len(jwt_parts) != 3 or not jwt_parts[2]):
+                logger.warning("Rejecting unsigned JWT in production mode")
+                return None
+
+            # Unpack payload
+            padded_payload = jwt_parts[1] + "=" * ((4 - len(jwt_parts[1]) % 4) % 4)
+            payload_json = base64.urlsafe_b64decode(padded_payload).decode("utf-8")
+            claims = json.loads(payload_json)
+
+            now = time.time()
+            # 1. Expiration check
+            if "exp" in claims and isinstance(claims["exp"], (int, float)):
+                if now > claims["exp"]:
+                    logger.warning("Rejecting expired token (exp=%s, now=%s)", claims["exp"], now)
+                    return None
+
+            # 2. Not-before check
+            if "nbf" in claims and isinstance(claims["nbf"], (int, float)):
+                if now < claims["nbf"]:
+                    logger.warning("Rejecting token not yet active (nbf=%s, now=%s)", claims["nbf"], now)
+                    return None
+
+            # 3. Issuer check
+            if self.expected_issuer and claims.get("iss") != self.expected_issuer:
+                logger.warning("Rejecting token with mismatched issuer: %s", claims.get("iss"))
+                return None
+
+            # 4. Audience check
+            if self.expected_audience and claims.get("aud") and claims.get("aud") != self.expected_audience:
+                logger.warning("Rejecting token with mismatched audience: %s", claims.get("aud"))
+                return None
+
+            role_str = claims.get("role", "ANALYST").upper()
+            role = getattr(UserRole, role_str, UserRole.ANALYST)
+            return AuthUserContext(
+                uid=claims.get("sub", claims.get("user_id", "anonymous")),
+                email=claims.get("email", "operator@reverse-forge.cloud"),
+                role=role,
+                tenant_id=claims.get("tenant_id", "default_tenant"),
+                token_claims=claims,
+            )
         except Exception as exc:
             logger.warning("Token verification failed: %s", exc)
 
-        if self.mock_mode:
+        if not self.is_production and self.mock_mode:
             return AuthUserContext(
                 uid="dev_operator",
                 email="operator@reverse-forge.local",
