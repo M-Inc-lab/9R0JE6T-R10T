@@ -409,5 +409,99 @@ class TestHardenedScopeLedgerAndAuthentication(unittest.TestCase):
             self.assertFalse(pipeline.scope_ledger.is_authorized("/etc/passwd", ActionPermission.READ_HASH))
 
 
+    def test_pipeline_dynamic_sandbox_never_executes_without_explicit_scope_and_hil(self):
+        """Prove that dynamic execution never runs on the host without explicit scope grant and HIL approval."""
+        from reverse_forge.pipeline import ReverseForgePipeline, StageStatus
+        from reverse_forge.provenance import ScopeLedger, ActionPermission
+        with tempfile.TemporaryDirectory() as td:
+            sample_p = os.path.join(td, "target.bin")
+            with open(sample_p, "wb") as f:
+                f.write(b"MZ" + b"\x00" * 62 + b"PE\x00\x00" + b"\x00" * 128)
+
+            # Scope explicitly permits only read_hash and static_analysis
+            ledger = ScopeLedger(
+                allowed_paths=[sample_p],
+                default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS],
+            )
+            pipeline = ReverseForgePipeline(artifact_path=sample_p, scope_ledger=ledger, workspace_dir=td)
+            pipeline.execute_stage(0)
+
+            # Attempt to execute stage 7 (Dynamic Sandbox) without HIL callback or permission
+            ok = pipeline.execute_stage(7)
+            self.assertTrue(ok)
+            # Stage must be explicitly SKIPPED and NO detonation profile written
+            self.assertEqual(pipeline.stages[7].status, StageStatus.SKIPPED)
+            self.assertIn("not authorized", pipeline.stages[7].output_summary.lower())
+            wsb_profile = os.path.join(td, "detonation_profile.wsb")
+            self.assertFalse(os.path.exists(wsb_profile))
+
+    def test_pipeline_blocks_execution_when_target_denied_by_scope(self):
+        """Prove that unauthorized binary paths fail immediately at Stage 0 without reading or analyzing."""
+        from reverse_forge.pipeline import ReverseForgePipeline, StageStatus
+        from reverse_forge.provenance import ScopeLedger
+        with tempfile.TemporaryDirectory() as td:
+            sample_p = os.path.join(td, "forbidden.bin")
+            with open(sample_p, "wb") as f:
+                f.write(b"\x7fELF" + b"\x00" * 64)
+
+            # Scope policy only authorizes authorized.bin
+            ledger = ScopeLedger(allowed_patterns=["authorized.bin"])
+            pipeline = ReverseForgePipeline(artifact_path=sample_p, scope_ledger=ledger, workspace_dir=td)
+
+            ok = pipeline.execute_stage(0)
+            self.assertFalse(ok)
+            self.assertEqual(pipeline.stages[0].status, StageStatus.FAILED)
+            self.assertIn("not authorized by ScopeLedger", pipeline.stages[0].error)
+            self.assertEqual(pipeline.binary_bytes, b"")
+
+    def test_hil_callback_denial_blocks_dynamic_execution(self):
+        """Prove that explicit operator denial in HIL callback stops dynamic analysis."""
+        from reverse_forge.pipeline import ReverseForgePipeline, StageStatus
+        from reverse_forge.provenance import ScopeLedger, ActionPermission
+        with tempfile.TemporaryDirectory() as td:
+            sample_p = os.path.join(td, "sample.bin")
+            with open(sample_p, "wb") as f:
+                f.write(b"MZ" + b"\x00" * 62 + b"PE\x00\x00" + b"\x00" * 128)
+
+            ledger = ScopeLedger(
+                allowed_paths=[sample_p],
+                default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS, ActionPermission.DYNAMIC_SANDBOX],
+            )
+            # HIL callback explicitly returns False (Operator says NO)
+            denial_callback = lambda prompt, ctx: False
+            pipeline = ReverseForgePipeline(
+                artifact_path=sample_p,
+                scope_ledger=ledger,
+                workspace_dir=td,
+                hil_callback=denial_callback,
+            )
+            pipeline.execute_stage(0)
+            pipeline.execute_stage(7)
+
+            self.assertEqual(pipeline.stages[7].status, StageStatus.SKIPPED)
+            self.assertIn("declined", pipeline.stages[7].output_summary.lower())
+
+    def test_native_bridge_fingerprint_and_abi_validation(self):
+        """Verify NativeRustAccelerator computes source fingerprints and rejects corrupted ABIs."""
+        from reverse_forge.native_rust_bridge import NativeRustAccelerator, BackendExecutionMode
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        fp = NativeRustAccelerator.compute_source_fingerprint(repo_root)
+        self.assertEqual(len(fp), 64)
+
+        # Verify active backend is explicitly identified
+        backend = NativeRustAccelerator.get_active_backend()
+        self.assertIn(backend, (BackendExecutionMode.RUST_NATIVE, BackendExecutionMode.C_FALLBACK, BackendExecutionMode.PURE_PYTHON))
+
+        # Verify ABI mock rejection: a broken library with invalid CRC16 return is rejected
+        mock_lib = unittest.mock.MagicMock()
+        mock_lib.rf_rust_flirt_crc16.return_value = 0xDEAD  # Wrong CRC16 vector
+        self.assertFalse(NativeRustAccelerator._validate_abi(mock_lib))
+
+        # A valid library vector is accepted
+        mock_lib.rf_rust_flirt_crc16.return_value = 0x906E
+        mock_lib.rf_rust_entropy.return_value = 0.0
+        self.assertTrue(NativeRustAccelerator._validate_abi(mock_lib))
+
+
 if __name__ == "__main__":
     unittest.main()

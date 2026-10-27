@@ -1,4 +1,4 @@
-name: R3V3R53//F0RG3 CI & Regression Suite
+name: R3V3R53//F0RG3 CI & Forensic Verification Suite
 
 on:
   push:
@@ -10,13 +10,37 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }} / Python ${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
+  rust-and-c-native:
+    name: Rust & C Fallback Native Verification (Ubuntu Linux x86-64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo Check
+        run: cargo check --manifest-path rust_core/Cargo.toml --all-targets
+
+      - name: Cargo Test
+        run: cargo test --manifest-path rust_core/Cargo.toml -- --nocapture
+
+      - name: Independent C Fallback Bridge Verification
+        run: |
+          gcc -O3 -shared -fPIC -Wall -Wextra -o /tmp/libreverse_forge_c.so rust_core/c_fallback_bridge.c -lm
+          test -f /tmp/libreverse_forge_c.so
+          nm -D /tmp/libreverse_forge_c.so | grep -E "rf_rust_entropy|rf_rust_flirt_crc16|rf_rust_visor_exec"
+
+  python-security-and-regression:
+    name: Security & Differential Regression Suite (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: [rust-and-c-native]
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
@@ -31,17 +55,40 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pefile capstone z3-solver
+          pip install pefile capstone z3-solver "pyjwt>=2.8.0" "cryptography>=41.0.0" pytest
           pip install -e .
 
-      - name: Run full unit & security regression suite
+      - name: Run Security Regression Suite (Fail-Closed Auth & Scope HIL)
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
-        run: |
-          python -m unittest discover -s tests -v
+        run: pytest tests/test_security_regressions.py -v
 
-      - name: Run CLI smoke checks
+      - name: Run Differential Analysis Validation Suite (Ground Truth vs Capstone/ELF/PE)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHONUTF8: "1"
+        run: pytest tests/test_differential_analysis_validation.py -v
+
+      - name: Run Firebase & Multi-Tenant Persistence Isolation Suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHONUTF8: "1"
+        run: pytest tests/test_firebase_sync.py -v
+
+      - name: Run Native Backend Selection & ABI Integrity Suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHONUTF8: "1"
+        run: pytest tests/test_phase86_90_rust_native_core.py -v
+
+      - name: Run Full Test Suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHONUTF8: "1"
+        run: pytest -v
+
+      - name: Run CLI Smoke Checks & Tool Availability Matrix
         env:
           PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"

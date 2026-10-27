@@ -102,7 +102,11 @@ class PipelineStateMachine:
             self.scope_ledger = ScopeLedger(
                 allowed_patterns=[os.path.basename(self.artifact_path)],
                 allowed_paths=[target_real, os.path.dirname(target_real)],
-                default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS],
+                default_actions=[
+                    ActionPermission.READ_HASH,
+                    ActionPermission.STATIC_ANALYSIS,
+                    ActionPermission.MODIFY_ARTIFACT,
+                ],
                 allow_all=False,
             )
         self.provenance_mgr = ProvenanceManager(workspace_dir)
@@ -131,13 +135,55 @@ class PipelineStateMachine:
             rec.output_summary = summary
             rec.error = error
 
-    def _check_hil_gate(self, prompt: str, context: Dict[str, Any]) -> bool:
+    STAGE_REQUIRED_PERMISSIONS = {
+        0: ActionPermission.READ_HASH,
+        1: ActionPermission.STATIC_ANALYSIS,
+        2: ActionPermission.STATIC_ANALYSIS,
+        3: ActionPermission.STATIC_ANALYSIS,
+        4: ActionPermission.STATIC_ANALYSIS,
+        5: ActionPermission.STATIC_ANALYSIS,
+        6: ActionPermission.STATIC_ANALYSIS,
+        7: ActionPermission.DYNAMIC_SANDBOX,
+        8: ActionPermission.STATIC_ANALYSIS,
+        9: ActionPermission.STATIC_ANALYSIS,
+        10: ActionPermission.MODIFY_ARTIFACT,
+        11: ActionPermission.MODIFY_ARTIFACT,
+    }
+
+    def _check_hil_gate(
+        self,
+        prompt: str,
+        context: Dict[str, Any],
+        action: ActionPermission = ActionPermission.DYNAMIC_SANDBOX,
+    ) -> bool:
+        """
+        Enforce mandatory human approval and scope authorization (§03.2, §03.3, Stage 3).
+        Autonomous mode CANNOT bypass security policies for sensitive actions.
+        Missing HIL callback strictly denies sensitive actions (fail-closed).
+        """
+        # 1. Mandatory Scope Check first: ScopeLedger must authorize the action
+        if not self.scope_ledger.is_authorized(self.artifact_path, action=action):
+            return False
+
+        # 2. Sensitive action gates require human operator sign-off
+        sensitive_actions = (
+            ActionPermission.DYNAMIC_SANDBOX,
+            ActionPermission.NETWORK_ACCESS,
+        )
+
+        if action in sensitive_actions:
+            if self.hil_callback:
+                return bool(self.hil_callback(prompt, context))
+            # Missing HIL approval callback strictly denies sensitive actions fail-closed
+            return False
+
+        # Static analysis and local artifact generation can proceed under autonomous progression
+        # if explicitly permitted by the scope policy
         if self.autonomy_level in (AutonomyLevel.AUTONOMOUS, AutonomyLevel.CONTINUOUS):
             return True
         if self.hil_callback:
-            return self.hil_callback(prompt, context)
-        # Default pass if no callback provided
-        return True
+            return bool(self.hil_callback(prompt, context))
+        return False
 
     def run_all(self) -> Dict[str, Any]:
         """Execute the full 12-stage pipeline sequentially."""
@@ -148,6 +194,23 @@ class PipelineStateMachine:
         return self.get_pipeline_state()
 
     def execute_stage(self, stage_id: int) -> bool:
+        req_action = self.STAGE_REQUIRED_PERMISSIONS.get(stage_id, ActionPermission.STATIC_ANALYSIS)
+        if not self.scope_ledger.is_authorized(self.artifact_path, action=req_action):
+            # If sensitive optional stage (like dynamic sandbox), mark SKIPPED with reason
+            if req_action in (ActionPermission.DYNAMIC_SANDBOX, ActionPermission.NETWORK_ACCESS):
+                self._mark_stage(
+                    stage_id,
+                    StageStatus.SKIPPED,
+                    summary=f"Skipped: Action '{req_action.value}' not authorized in ScopeLedger policy"
+                )
+                return True
+            self._mark_stage(
+                stage_id,
+                StageStatus.FAILED,
+                error=f"Security Policy Denied: Action '{req_action.value}' not authorized by ScopeLedger for target '{self.artifact_path}'"
+            )
+            return False
+
         if not self.loop_guard.record_transition(stage_id, self.format_name):
             self._mark_stage(stage_id, StageStatus.FAILED, error="Anti-loop guard detected infinite cyclic transition")
             return False
@@ -500,8 +563,11 @@ class PipelineStateMachine:
 
     # Stage 7: Sandboxed Dynamic Analysis (Optional/Gated)
     def _stage_7(self) -> bool:
-        # Dynamic execution is sandboxed and gated
-        authorized = self._check_hil_gate("Execute dynamic behavioral analysis in sandbox?", {"target": self.artifact_path})
+        authorized = self._check_hil_gate(
+            "Execute dynamic behavioral analysis in sandbox?",
+            {"target": self.artifact_path, "stage": 7},
+            action=ActionPermission.DYNAMIC_SANDBOX,
+        )
         if not authorized:
             self._mark_stage(7, StageStatus.SKIPPED, summary="Operator declined sandboxed dynamic execution.")
             return True

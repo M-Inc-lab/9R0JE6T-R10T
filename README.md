@@ -1,43 +1,91 @@
-# 9R0JE6T-R10T (`R3V3R53//F0RG3` v1.0.0)
+# 9R0JE6T-R10T (`R3V3R53//F0RG3` v26.0.0)
 
-Autonomous, multi-tool cross-platform reverse engineering, static/dynamic correlation, and vulnerability research engine implementing the **R3V3RSE//F0RG3 v1.0** specification.
+[![Forensic Verification CI](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/workflows/ci.yml/badge.svg)](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/workflows/ci.yml)
 
-## Architecture & Module Inventory (Phases 1–9)
+A forensic-grade, evidence-driven reverse engineering and binary vulnerability analysis suite.
 
-| Module | Spec Mapping | Capabilities |
+---
+
+## 1. Authoritative Versioning & Supported Platform Matrix
+
+- **Authoritative Version**: `26.0.0` (Moniker: `rust-bicentennial`).
+  - Python Package: `pyproject.toml` (`26.0.0`) & `reverse_forge/__init__.py` (`__version__ = "26.0.0"`, `__release_tag__ = "26.0.0-rust-bicentennial"`)
+  - Rust Core Engine: `rust_core/Cargo.toml` (`26.0.0`)
+- **Verified Platform**: **Linux x86-64 (AMD64)**
+  - Native Rust acceleration, C fallback bridge, and micro-visor execution are formally tested and verified on Linux AMD64.
+  - Windows/macOS execution paths are experimental; cross-platform claims are limited to pure-Python parsing layers unless compiled in dedicated native host environments.
+
+---
+
+## 2. Core Architecture & Subsystems
+
+| Subsystem | File Reference | Functionality & Guarantees |
 | :--- | :--- | :--- |
-| `reverse_forge/cli.py` | §00, §15 | Unified CLI orchestrating 18 subcommands across static, dynamic, taint, crypto, and pipeline workflows. |
-| `reverse_forge/provenance.py` | §01, §03.1, §04 | Cryptographic provenance (`SHA-256`, `SHA-1`, `MD5`), `ScopeLedger` authorization checks, and read-only working-copy isolation (`0444`). |
-| `reverse_forge/layer_unpacker.py` | §01.4, §04.2 | Multi-layer container signature scanner (`ZIP`, `GZIP`, `SquashFS`, `U-Boot`), `.NET CLR` metadata inspector, `JAR`/`WAR` manifest/class analyzer, and Universal Mach-O slice parser. |
-| `reverse_forge/pe_analyzer.py` & `windows_engine.py` | §01.1, §05, §13.1 | Pure-Python + `pefile` PE32/PE32+ header, section, mitigation (`ASLR`, `DEP`, `CFG`, `SafeSEH`), Authenticode (`$env:RF_TARGET_PATH`), and IAT/EAT capability auditor. |
-| `reverse_forge/elf_analyzer.py` | §01.2, §05, §13.5 | ELF32/ELF64 segment, section, `PT_DYNAMIC` (`DT_NEEDED`, `RPATH`, `RUNPATH`), `.dynsym`/`.symtab` symbol, and mitigation (`NX`, `PIE`, `Full/Partial RELRO`, `Canary`, `FORTIFY_SOURCE`) auditor. |
-| `reverse_forge/macho_analyzer.py` | §01.3, §05, §13.6 | Mach-O 32/64/Fat parser with `JVM .class` (`0xCAFEBABE`) disambiguation, `LC_LOAD_DYLIB`, `LC_RPATH`, `LC_SYMTAB`, and `LC_CODE_SIGNATURE` (`CS_SuperBlob` + XML entitlements) auditor. |
-| `reverse_forge/ghidra_analyzer.py` & `correlation_engine.py` | §02.1–§02.4 | Multi-tool orchestrator combining Native Parsers, `Radare2` (`aa; iIj; aflj`), headless `Ghidra` (`analyzeHeadless` exporting functions, sink xrefs, and decompiled C pseudocode), and `Capstone` entry-point disassembly. |
-| `reverse_forge/dataflow_engine.py` | §05.3, §09, §10 | Directed call-graph builder and BFS source-to-sink taint reachability engine (`recv`/`fread`/`getenv` to `strcpy`/`sprintf`/`system`/`free`). |
-| `reverse_forge/crypto_engine.py` | §14 | Binary constant scanner (`MD5`, `SHA-1`, `SHA-256`, `AES Rcon/S-Box`) and masked hardcoded secret detector (`RSA/PEM`, `AWS AKIA`, `JWT`, generic API keys). |
-| `reverse_forge/windows_sandbox.py` & `behavioral_engine.py` | §07, §08 | Hardened `.wsb` XML generator, PowerShell telemetry collector script generator, and runtime trace (`process`, `file`, `registry`, `network`, `crash`) to static indicator correlator. |
-| `reverse_forge/pipeline.py` & `reporter.py` | §03.2, §16–§19 | 12-stage state machine (`Stage 0`–`Stage 11`) with `AutonomyLevel` (`0`–`4`) HIL gates, `AntiLoopGuard`, and dual Executive Summary + Technical 5WH report generator (JSON & Markdown). |
-| `reverse_forge/remediation_engine.py` | §20–§22 | Automated C/C++ unified diff patch synthesizer, compiler hardening flag recommender, and standalone C regression test harness generator mapped by CWE. |
+| **Fail-Closed Security & HIL** | `reverse_forge/pipeline.py` | 12-stage pipeline state machine. Strict HIL approval gates for dynamic execution, network access, and artifact mutation. ScopeLedger enforces canonical realpath containment. Autonomy levels cannot bypass security policy. |
+| **Cryptographic Authentication & Cloud Sync** | `reverse_forge/firebase_sync.py` | PyJWT token verification with signature, expiry (`exp`), and audience/issuer validation. Strict separation of `LocalSimulationPersistenceAdapter` (tenant-isolated memory) and `ProductionFirestoreStorageAdapter`. |
+| **Native Multi-Backend Core** | `reverse_forge/native_rust_bridge.py` | Explicit backend identity (`RUST_NATIVE`, `C_FALLBACK`, `PURE_PYTHON`). Cryptographic source fingerprinting, visible compiler diagnostics, ABI verification vectors, and multi-iteration warm-up benchmarks. |
+| **Binary Analyzers** | `reverse_forge/pe_analyzer.py`, `elf_analyzer.py` | Deep static inspection of PE32+ (mitigations, sections, Authenticode) and ELF64 (segments, symbols, dynamic linkages). Fail-closed error handling on corrupt or truncated inputs. |
+| **Differential Validation** | `tests/test_differential_analysis_validation.py` | Ground-truth concordance against Capstone v5.0.7 (x86-64 instruction lengths and trap handling) and standard FLIRT CRC16 vectors. |
+| **Provenance & Audit** | `reverse_forge/provenance.py` | SHA-256 cryptographic hashing, immutable read-only working copy creation (`0444`), and action ledgers. |
 
-## Quick Start
+---
+
+## 3. Quick Start & CLI Workflows
+
+### Environment Setup
+```bash
+# Clone repository
+git clone https://github.com/M-Inc-lab/9R0JE6T-R10T.git
+cd 9R0JE6T-R10T
+
+# Install dependencies and package in editable mode
+pip install -e .[all]
+```
+
+### Running Analysis
+```bash
+# Run pipeline with explicit scope authorization
+python3 -m reverse_forge.cli pipeline -i /bin/ls --autonomy 2 --output-md report.md --output-json report.json
+
+# Tool discovery and dependency matrix inspection
+python3 -m reverse_forge.cli detect-tools
+
+# Static format inspection
+python3 -m reverse_forge.cli elf-audit -i /bin/ls
+python3 -m reverse_forge.cli win-audit -i /path/to/binary.exe
+```
+
+---
+
+## 4. Verification & Testing
+
+The repository maintains strict regression and differential verification test suites:
 
 ```bash
-# Run the full 12-stage autonomous pipeline (outputs Executive + Technical Markdown/JSON reports)
-python3 -m reverse_forge.cli pipeline -i /path/to/binary --autonomy 3 --output-md report.md --output-json report.json
+# 1. Run security regression tests (Fail-closed HIL, ScopeLedger realpaths, JWT verification)
+pytest tests/test_security_regressions.py -v
 
-# Platform-specific deep static audits
-python3 -m reverse_forge.cli win-audit -i /path/to/binary.exe
-python3 -m reverse_forge.cli elf-audit -i /bin/ls
-python3 -m reverse_forge.cli macho-audit -i /path/to/macos_binary
-python3 -m reverse_forge.cli ghidra-audit -i /path/to/binary
+# 2. Run differential ground-truth analysis tests (Capstone, ELF headers, PE32+ spec)
+pytest tests/test_differential_analysis_validation.py -v
 
-# Specialized analysis engines
-python3 -m reverse_forge.cli unpack -i /path/to/container_or_dotnet.exe
-python3 -m reverse_forge.cli dataflow -i /path/to/binary
-python3 -m reverse_forge.cli crypto-audit -i /path/to/binary
-python3 -m reverse_forge.cli behavioral-correlate -t telemetry_trace.json -b /path/to/binary
-python3 -m reverse_forge.cli remediate --cwe CWE-120 --symbol parse_packet
+# 3. Run multi-tenant Firebase persistence isolation tests
+pytest tests/test_firebase_sync.py -v
 
-# Run the 31-test automated security & functional regression suite
-python3 -m unittest discover -s tests -v
+# 4. Run native Rust/C bridge selection and ABI verification
+pytest tests/test_phase86_90_rust_native_core.py -v
+
+# 5. Run native Rust cargo test suite
+cargo test --manifest-path rust_core/Cargo.toml
+
+# 6. Run full Python test suite
+pytest -v
 ```
+
+---
+
+## 5. Security Model & Documentation
+For detailed architecture, threat modeling, and formal capability bounds, consult:
+- `docs/SECOND_PASS_AUDIT.md`: Forensic audit report and baseline findings.
+- `docs/SECURITY_MODEL.md`: Fail-closed security architecture, RBAC, and boundary enforcement.
+- `docs/CAPABILITY_MATRIX.md`: Verified, heuristic, and simulated capability ledger.
+- `docs/ANALYSIS_VALIDATION.md`: Differential verification results against ground truth.
