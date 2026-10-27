@@ -88,6 +88,12 @@ jobs:
           PYTHONUTF8: "1"
         run: pytest tests/test_phase86_90_rust_native_core.py -v
 
+      - name: Run Phase 3 E2E Trust Boundary & Authorization Suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHONUTF8: "1"
+        run: pytest tests/test_phase3_e2e_trust_boundary.py -v
+
       - name: Run Full Test Suite
         env:
           PYTHONPATH: ${{ github.workspace }}
