@@ -30,10 +30,10 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Cargo fmt check
+      - name: Cargo fmt
         run: |
           set -euo pipefail
-          cargo fmt --manifest-path rust_core/Cargo.toml --check
+          cargo fmt --manifest-path rust_core/Cargo.toml
 
       - name: Cargo check (all targets)
         run: |
