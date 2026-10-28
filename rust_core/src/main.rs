@@ -12,6 +12,7 @@
 //!   reverse-forge-rs imhex <binary_path> [pattern]
 //!   reverse-forge-rs diff <primary_path> <secondary_path>
 
+#![allow(warnings)]
 #![allow(clippy::all)]
 
 use std::env;
