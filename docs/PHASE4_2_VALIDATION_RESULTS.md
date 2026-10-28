@@ -74,20 +74,23 @@ The test suite includes dedicated negative adversarial tests proving that unauth
 
 ## 4. GitHub Actions CI Evidence & Matrix Verification
 
-- **Commit SHA:** `abfa697ce8c310e2be24d3eed0f54566977fd901`
+### Final CI Run (Commit `29cfc35848c08272ea63e14dfcbf9bdfcb7b1f13`)
+- **Commit SHA:** `29cfc35848c08272ea63e14dfcbf9bdfcb7b1f13`
 - **Workflow:** `R3V3R53//F0RG3 CI — Phase 4.1 Hardened Pipeline`
-- **Workflow Run URL:** `https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583`
+- **Workflow Run URL:** `https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660683381`
 - **Overall Workflow Conclusion:** **SUCCESS (All 7 Jobs Passed)**
 
-### Detailed CI Job Status
-
-| Job Name | Python / Env | Status | Conclusion | Job Run URL |
+| Job Name | Python / Env | Status | Conclusion | Job Run ID |
 |---|---|---|---|---|
-| **Rust & C Native Verification** | `ubuntu-latest` / Rust 1.99.1 stable | `completed` | **success** | [Run 122721089013](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721089013) |
-| **Clean Wheel & Sdist Verification** | Python 3.10 | `completed` | **success** | [Run 122721089242](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721089242) |
-| **Clean Wheel & Sdist Verification** | Python 3.11 | `completed` | **success** | [Run 122721089201](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721089201) |
-| **Clean Wheel & Sdist Verification** | Python 3.12 | `completed` | **success** | [Run 122721089260](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721089260) |
-| **Security & Regression Matrix** | Python 3.10 | `completed` | **success** | [Run 122721209165](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721209165) |
-| **Security & Regression Matrix** | Python 3.11 | `completed` | **success** | [Run 122721209422](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721209422) |
-| **Security & Regression Matrix** | Python 3.12 | `completed` | **success** | [Run 122721209419](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721209419) |
+| **Rust & C Native Verification** | `ubuntu-latest` / Rust 1.99.1 stable | `completed` | **success** | [122722659510](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660683381/job/122722659510) |
+| **Clean Wheel & Sdist Verification** | Python 3.10 | `completed` | **success** | [122722659799](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660683381/job/122722659799) |
+| **Clean Wheel & Sdist Verification** | Python 3.11 | `completed` | **success** | [122722659851](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660683381/job/122722659851) |
+| **Clean Wheel & Sdist Verification** | Python 3.12 | `completed` | **success** | [122722659915](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660683381/job/122722659915) |
+| **Security & Regression Matrix** | Python 3.10 | `completed` | **success** | [122722869441](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660683381/job/122722869441) |
+| **Security & Regression Matrix** | Python 3.11 | `completed` | **success** | [122722869393](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660683381/job/122722869393) |
+| **Security & Regression Matrix** | Python 3.12 | `completed` | **success** | [122722869450](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660683381/job/122722869450) |
+
+### Prior Verification Run (Commit `abfa697ce8c310e2be24d3eed0f54566977fd901`)
+- **Workflow Run URL:** `https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583`
+- **Overall Workflow Conclusion:** **SUCCESS (All 7 Jobs Passed)**
 
