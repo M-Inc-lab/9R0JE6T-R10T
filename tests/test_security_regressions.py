@@ -11,6 +11,7 @@ from unittest.mock import patch, MagicMock
 import xml.etree.ElementTree as ET
 import zipfile
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from connect_colab import validate_endpoint_url
 from reverse_forge.correlation_engine import CorrelationEngine
 from reverse_forge.elf_analyzer import ELFAnalyzer
