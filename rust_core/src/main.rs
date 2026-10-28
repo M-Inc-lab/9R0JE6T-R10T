@@ -83,13 +83,19 @@ fn main() {
         "all" | "triage" => {
             let code_slice = &data[..data.len().min(512)];
             let blocks = lift_bytes_to_pcode_blocks(code_slice, summary.entry_point_va);
-            let pcode_res = GhidraPcodeDecompiler::emit_structured_c(&blocks, "entry_main", summary.entry_point_va);
+            let pcode_res = GhidraPcodeDecompiler::emit_structured_c(
+                &blocks,
+                "entry_main",
+                summary.entry_point_va,
+            );
             let mut visor = RustMicroVisor::new(summary.entry_point_va);
             let vres = visor.execute(summary.entry_point_va, code_slice, 128);
             let elapsed_us = t0.elapsed().as_micros();
 
             println!("{{");
-            println!("  \"engine\": \"reverse-forge-rs (16-Category Standalone Native Rust Suite)\",");
+            println!(
+                "  \"engine\": \"reverse-forge-rs (16-Category Standalone Native Rust Suite)\","
+            );
             println!("  \"version\": \"26.0.0-rust-bicentennial\",");
             println!("  \"elapsed_microseconds\": {},", elapsed_us);
             println!("  \"format\": \"{}\",", summary.format);
@@ -102,7 +108,10 @@ fn main() {
             println!("  \"checksec_cfi\": {{ \"aslr\": {}, \"dep_nx\": {}, \"cfg\": {}, \"canary\": {}, \"cet_endbr_count\": {}, \"score\": {} }},",
                 cfi.aslr_or_pie, cfi.dep_nx, cfi.control_flow_guard, cfi.stack_canary_present, cfi.intel_cet_endbr_count, cfi.hardening_score);
             println!("  \"bytecode_runtime\": \"{}\",", bc.runtime);
-            println!("  \"firmware_partitions_carved\": {},", fw.carved_partitions.len());
+            println!(
+                "  \"firmware_partitions_carved\": {},",
+                fw.carved_partitions.len()
+            );
             println!("  \"visor_execution\": {{ \"steps\": {}, \"auto_paged_faults\": {}, \"final_rax\": \"0x{:x}\" }},",
                 vres.steps_executed, vres.auto_paged_faults, vres.final_rax);
             println!("  \"pcode_ops_lifted\": {},", pcode_res.total_pcode_ops);
@@ -112,7 +121,11 @@ fn main() {
         "decompile" => {
             let code_slice = &data[..data.len().min(512)];
             let blocks = lift_bytes_to_pcode_blocks(code_slice, summary.entry_point_va);
-            let res = GhidraPcodeDecompiler::emit_structured_c(&blocks, "entry_main", summary.entry_point_va);
+            let res = GhidraPcodeDecompiler::emit_structured_c(
+                &blocks,
+                "entry_main",
+                summary.entry_point_va,
+            );
             println!("{}", res.c_source);
         }
         "visor" => {
@@ -134,7 +147,9 @@ fn main() {
         "firmware" => {
             println!(
                 "{{\"is_cortex_m\": {}, \"inferred_base\": \"0x{:x}\", \"partitions_count\": {}}}",
-                fw.is_cortex_m_vector_table, fw.inferred_base_address, fw.carved_partitions.len()
+                fw.is_cortex_m_vector_table,
+                fw.inferred_base_address,
+                fw.carved_partitions.len()
             );
         }
         "pcap" => {
@@ -165,7 +180,10 @@ fn main() {
             };
             let fields = evaluate_imhex_pattern(&data, 0, pat);
             for f in fields {
-                println!("0x{:04x}: {} {} = {}", f.offset, f.field_type, f.field_name, f.formatted_value);
+                println!(
+                    "0x{:04x}: {} {} = {}",
+                    f.offset, f.field_type, f.field_name, f.formatted_value
+                );
             }
         }
         "deobfuscate" => {
@@ -193,7 +211,13 @@ fn main() {
         "yara-bridge" => {
             let mut v_eng = RustTaintVsaVulnEngine::new();
             let v_rep = v_eng.audit_binary_and_insns(&data, &[], cfi.rwx_sections_count > 0);
-            let bundle = synthesize_yara_sigma_and_layer2_bridge(&data, path, fnv, summary.entry_point_va, &v_rep.findings);
+            let bundle = synthesize_yara_sigma_and_layer2_bridge(
+                &data,
+                path,
+                fnv,
+                summary.entry_point_va,
+                &v_rep.findings,
+            );
             println!("{}", bundle.yara_rule);
         }
         "elf-deep" => {
