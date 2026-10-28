@@ -105,11 +105,43 @@ class TestPhase63To65WebUploadAnnotateAndZenithCLI(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 403)
 
             # 2. Test POST /api/upload (UX-01)
-            up_req = urllib.request.Request(
+            # Phase 4.2: Verify unauthenticated upload is strictly rejected with HTTP 401
+            unauth_req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/api/upload?filename=sample_upload.exe",
                 data=pe_bytes,
                 method="POST",
                 headers={"Origin": f"http://127.0.0.1:{port}"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(unauth_req)
+            self.assertEqual(ctx.exception.code, 401)
+
+            # Authenticate with valid JWT token
+            import time
+            from reverse_forge.gui_server import firebase_sync
+            from reverse_forge.firebase_sync import jwt
+            jwt_secret = "zenith_test_jwt_secret_32_bytes_len!!"
+            firebase_sync.auth.verification_key = jwt_secret
+            firebase_sync.auth.allowed_algorithms = ["HS256"]
+            auth_token = jwt.encode(
+                {
+                    "sub": "zenith_analyst",
+                    "email": "analyst@zenith.local",
+                    "role": "ANALYST",
+                    "tenant_id": "default_tenant",
+                    "iss": firebase_sync.auth.expected_issuer,
+                    "aud": firebase_sync.auth.expected_audience,
+                    "exp": time.time() + 3600,
+                },
+                jwt_secret,
+                algorithm="HS256",
+            )
+
+            up_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/upload?filename=sample_upload.exe",
+                data=pe_bytes,
+                method="POST",
+                headers={"Origin": f"http://127.0.0.1:{port}", "Authorization": f"Bearer {auth_token}"},
             )
             with urllib.request.urlopen(up_req) as r:
                 up_data = json.loads(r.read().decode("utf-8"))
@@ -142,7 +174,7 @@ class TestPhase63To65WebUploadAnnotateAndZenithCLI(unittest.TestCase):
                 f"http://127.0.0.1:{port}/api/annotate",
                 data=ann_body,
                 method="POST",
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {auth_token}"},
             )
             with urllib.request.urlopen(ann_req) as r:
                 ann_resp = json.loads(r.read().decode("utf-8"))
