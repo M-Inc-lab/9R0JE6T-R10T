@@ -69,3 +69,25 @@ The test suite includes dedicated negative adversarial tests proving that unauth
 
 4. **Unauthenticated HTTP POST:**
    - `test_upload_requires_auth_without_strict_auth` and `test_annotate_requires_auth_without_strict_auth` prove that unauthenticated requests to `/api/upload` and `/api/annotate` return HTTP 401 and write zero bytes to disk or database.
+
+---
+
+## 4. GitHub Actions CI Evidence & Matrix Verification
+
+- **Commit SHA:** `abfa697ce8c310e2be24d3eed0f54566977fd901`
+- **Workflow:** `R3V3R53//F0RG3 CI — Phase 4.1 Hardened Pipeline`
+- **Workflow Run URL:** `https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583`
+- **Overall Workflow Conclusion:** **SUCCESS (All 7 Jobs Passed)**
+
+### Detailed CI Job Status
+
+| Job Name | Python / Env | Status | Conclusion | Job Run URL |
+|---|---|---|---|---|
+| **Rust & C Native Verification** | `ubuntu-latest` / Rust 1.99.1 stable | `completed` | **success** | [Run 122721089013](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721089013) |
+| **Clean Wheel & Sdist Verification** | Python 3.10 | `completed` | **success** | [Run 122721089242](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721089242) |
+| **Clean Wheel & Sdist Verification** | Python 3.11 | `completed` | **success** | [Run 122721089201](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721089201) |
+| **Clean Wheel & Sdist Verification** | Python 3.12 | `completed` | **success** | [Run 122721089260](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721089260) |
+| **Security & Regression Matrix** | Python 3.10 | `completed` | **success** | [Run 122721209165](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721209165) |
+| **Security & Regression Matrix** | Python 3.11 | `completed` | **success** | [Run 122721209422](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721209422) |
+| **Security & Regression Matrix** | Python 3.12 | `completed` | **success** | [Run 122721209419](https://github.com/M-Inc-lab/9R0JE6T-R10T/actions/runs/40660217583/job/122721209419) |
+
