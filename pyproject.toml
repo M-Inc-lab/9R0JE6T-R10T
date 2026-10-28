@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77.0"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +8,13 @@ version = "26.0.0"
 description = "R3V3R53//F0RG3 - Self-Sufficient Cross-Platform Reverse Engineering & Vulnerability Research Suite"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "GPL-3.0-only"
+license = {text = "GPL-3.0-only"}
 dependencies = [
     "pefile>=2023.2.7",
     "capstone>=5.0.0",
     "z3-solver>=4.12.0",
     "pyjwt>=2.8.0",
-    "cryptography>=41.0.0",
+    "cryptography>=38.0.0",
 ]
 
 [project.optional-dependencies]
@@ -62,10 +62,13 @@ exclude = [
     "tests*",
     "docs*",
     ".github*",
+    "build*",
+    "dist*",
+    ".reverse_forge_workspace*",
     "__pycache__*",
 ]
 
-# Ship native shared libraries and test fixtures inside the package.
+# Ship native shared libraries inside the package.
 [tool.setuptools.package-data]
 reverse_forge = [
     "bin/*.so",
@@ -79,4 +82,3 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-

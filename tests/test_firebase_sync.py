@@ -1,24 +1,25 @@
 """
 Unit & Integration Tests for Firebase Cloud Sync Module (Dimension 2: Backend Architecture & Firebase)
-Updated for Stage 2 & Stage 4: Cryptographic JWT verification, fail-closed auth, and tenant isolation.
+Updated for Stage 2, Stage 4 & Phase 4.1: Cryptographic JWT verification, unforgeable identity seals,
+fail-closed auth, strict persistence validation, and tenant isolation.
 """
 
 import os
 import time
 import unittest
-from unittest.mock import patch
-
-try:
-    import jwt
-except ImportError:
-    jwt = None
+from unittest.mock import MagicMock, patch
 
 from reverse_forge.firebase_sync import (
     AuthUserContext,
     FirebaseAuthManager,
     FirebaseSyncManager,
     LocalSimulationPersistenceAdapter,
+    PersistencePermissionError,
+    PersistenceUnavailableError,
+    ProductionFirestoreStorageAdapter,
+    SharedRevocationStore,
     UserRole,
+    jwt,
 )
 
 
@@ -32,11 +33,12 @@ class TestFirebaseSyncEngine(unittest.TestCase):
         self.auth.allow_dev_mock = True
 
     def test_mock_auth_fallback_in_dev_mode(self):
-        """In development mode, mock auth provides developer context."""
+        """In development mode, mock auth provides unverified VIEWER context."""
         user = self.auth.verify_bearer_token(None)
         self.assertIsNotNone(user)
         self.assertEqual(user.role, UserRole.VIEWER)
         self.assertFalse(user.is_verified)
+        self.assertFalse(user.is_cryptographically_verified())
         self.assertFalse(user.can_modify())
         self.assertFalse(user.is_lead())
 
@@ -62,6 +64,7 @@ class TestFirebaseSyncEngine(unittest.TestCase):
         self.assertTrue(user.can_modify())
         self.assertFalse(user.is_lead())
         self.assertTrue(user.is_verified)
+        self.assertTrue(user.is_cryptographically_verified())
 
     def test_unsigned_jwt_strictly_rejected(self):
         """Security regression: tokens with alg='none' or unsigned payloads must be rejected."""
@@ -88,13 +91,40 @@ class TestFirebaseSyncEngine(unittest.TestCase):
             self.assertIsNone(prod_auth.verify_bearer_token(""))
 
     def test_viewer_role_cannot_modify_findings(self):
-        viewer = AuthUserContext(uid="view_1", email="view@lab.org", role=UserRole.VIEWER, tenant_id="tenant_x", is_verified=True)
+        viewer = self.auth.issue_verified_context(
+            uid="view_1",
+            email="view@lab.org",
+            role=UserRole.VIEWER,
+            tenant_id="tenant_x",
+        )
+        self.assertTrue(viewer.is_cryptographically_verified())
         self.assertFalse(viewer.can_modify())
         with self.assertRaises(PermissionError):
-            self.sync.sync_findings("dummy_sha", [{"title": "test"}], viewer)
+            self.sync.sync_findings("a" * 64, [{"title": "test"}], viewer)
+
+    def test_direct_auth_user_context_construction_cannot_forge_verification(self):
+        """Phase 4.1 §4: Constructing AuthUserContext(..., is_verified=True) directly is unsealed and rejected."""
+        forged = AuthUserContext(
+            uid="forged_admin",
+            email="forged@evil.org",
+            role=UserRole.LEAD_ARCHITECT,
+            tenant_id="tenant_x",
+            is_verified=True,
+        )
+        self.assertFalse(forged.is_verified)
+        self.assertFalse(forged.is_cryptographically_verified())
+        self.assertFalse(forged.can_modify())
+        self.assertFalse(forged.is_lead())
+        with self.assertRaises(PermissionError):
+            self.sync.sync_findings("a" * 64, [{"title": "test"}], forged)
 
     def test_artifact_and_findings_sync_lifecycle(self):
-        lead = AuthUserContext(uid="lead_1", email="lead@lab.org", role=UserRole.LEAD_ARCHITECT, tenant_id="tenant_x", is_verified=True)
+        lead = self.auth.issue_verified_context(
+            uid="lead_1",
+            email="lead@lab.org",
+            role=UserRole.LEAD_ARCHITECT,
+            tenant_id="tenant_x",
+        )
         sha = "a" * 64
         doc = self.sync.sync_artifact(
             sha256=sha,
@@ -128,8 +158,12 @@ class TestFirebaseSyncEngine(unittest.TestCase):
 
     def test_multi_tenant_artifact_isolation(self):
         """Cross-tenant isolation: Tenant B cannot access Tenant A's artifacts or findings."""
-        user_a = AuthUserContext(uid="alice", email="alice@corp.com", role=UserRole.ANALYST, tenant_id="tenant_alpha", is_verified=True)
-        user_b = AuthUserContext(uid="bob", email="bob@evil.com", role=UserRole.ANALYST, tenant_id="tenant_beta", is_verified=True)
+        user_a = self.auth.issue_verified_context(
+            uid="alice", email="alice@corp.com", role=UserRole.ANALYST, tenant_id="tenant_alpha"
+        )
+        user_b = self.auth.issue_verified_context(
+            uid="bob", email="bob@evil.com", role=UserRole.ANALYST, tenant_id="tenant_beta"
+        )
 
         sha = "c" * 64
         self.sync.sync_artifact(
@@ -152,8 +186,14 @@ class TestFirebaseSyncEngine(unittest.TestCase):
         self.assertIsNone(self.sync.get_artifact(sha, user=user_b))
         self.assertEqual(len(self.sync.get_findings(sha, user=user_b)), 0)
 
+        # Explicit mismatched tenant_id parameter alongside user_b is rejected with PersistencePermissionError
+        with self.assertRaises(PersistencePermissionError):
+            self.sync.get_artifact(sha, user=user_b, tenant_id="tenant_alpha")
+
     def test_binary_and_report_archival(self):
-        analyst = AuthUserContext(uid="a_1", email="a@lab.org", role=UserRole.ANALYST, tenant_id="lab_sec", is_verified=True)
+        analyst = self.auth.issue_verified_context(
+            uid="a_1", email="a@lab.org", role=UserRole.ANALYST, tenant_id="lab_sec"
+        )
         sha = "b" * 64
         data = b"\x7fELFtestbinarypayload"
         # Archive binary
@@ -169,8 +209,11 @@ class TestFirebaseSyncEngine(unittest.TestCase):
         self.assertTrue(sarif_url.startswith("local-sim://"))
 
     def test_analysis_job_lifecycle(self):
-        user = AuthUserContext(uid="u_99", email="op@corp.com", role=UserRole.ANALYST, tenant_id="corp_lab", is_verified=True)
-        job = self.sync.create_analysis_job("dummy_sha_1234", "DEEP_FORENSIC", user)
+        user = self.auth.issue_verified_context(
+            uid="u_99", email="op@corp.com", role=UserRole.ANALYST, tenant_id="corp_lab"
+        )
+        sha = "d" * 64
+        job = self.sync.create_analysis_job(sha, "DEEP_FORENSIC", user)
         self.assertTrue(job.job_id.startswith("job_"))
         self.assertEqual(job.status, "QUEUED")
 
@@ -216,6 +259,7 @@ class TestFirebaseSyncEngine(unittest.TestCase):
         user = self.auth.verify_bearer_token(f"Bearer {token}")
         self.assertIsNotNone(user)
         self.assertTrue(user.is_verified)
+        self.assertTrue(user.is_cryptographically_verified())
         self.assertEqual(user.uid, "user_verified_123")
         self.assertEqual(user.role, UserRole.ANALYST)
         self.assertTrue(user.can_modify())
@@ -286,7 +330,7 @@ class TestFirebaseSyncEngine(unittest.TestCase):
         self.assertFalse(unverified_admin.can_modify())
         self.assertFalse(unverified_admin.is_lead())
         with self.assertRaises(PermissionError):
-            self.sync.sync_findings("dummy_sha", [{"title": "fake"}], unverified_admin)
+            self.sync.sync_findings("a" * 64, [{"title": "fake"}], unverified_admin)
 
     def test_b11_fabricated_tenant_id(self):
         """11. Fabricated tenant ID outside trusted policy rejected."""
@@ -335,4 +379,3 @@ class TestFirebaseSyncEngine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

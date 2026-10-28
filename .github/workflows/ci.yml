@@ -1,4 +1,4 @@
-name: R3V3R53//F0RG3 CI — Phase 4 Hardened Pipeline
+name: R3V3R53//F0RG3 CI — Phase 4.1 Hardened Pipeline
 
 on:
   push:
@@ -9,87 +9,137 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 # ---------------------------------------------------------------------------
-# Job 1: Rust & C native verification (independent from Python)
+# Job 1: Rust & C native verification (independent from Python, fail-closed)
 # ---------------------------------------------------------------------------
 jobs:
   rust-and-c-native:
     name: "Rust & C Native Verification"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@32fc2f3bf5dc4bfef0fb0fb6b1ef6d719befab68 # stable
         with:
           components: rustfmt, clippy
 
       - name: Cargo fmt check
-        run: cargo fmt --manifest-path rust_core/Cargo.toml --check
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path rust_core/Cargo.toml --check
 
       - name: Cargo check (all targets)
-        run: cargo check --manifest-path rust_core/Cargo.toml --all-targets
+        run: |
+          set -euo pipefail
+          cargo check --manifest-path rust_core/Cargo.toml --all-targets
 
       - name: Cargo clippy (deny warnings)
-        run: cargo clippy --manifest-path rust_core/Cargo.toml -- -D warnings
-        continue-on-error: true   # warnings only — does not hide test failures
+        run: |
+          set -euo pipefail
+          cargo clippy --manifest-path rust_core/Cargo.toml --all-targets -- -D warnings
 
       - name: Cargo test
-        run: cargo test --manifest-path rust_core/Cargo.toml -- --nocapture
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path rust_core/Cargo.toml -- --nocapture
 
       - name: C fallback bridge — compile and verify symbols
         run: |
-          gcc -O3 -shared -fPIC -Wall -Wextra \
+          set -euo pipefail
+          gcc -O3 -shared -fPIC -Wall -Wextra -Werror \
             -o /tmp/libreverse_forge_c.so rust_core/c_fallback_bridge.c -lm
           test -f /tmp/libreverse_forge_c.so
           nm -D /tmp/libreverse_forge_c.so | grep -E \
             "rf_rust_entropy|rf_rust_flirt_crc16|rf_rust_visor_exec|rf_native_backend_identity"
 
 # ---------------------------------------------------------------------------
-# Job 2: Package installation verification (clean environment)
-# Tests that `pip install -e .` succeeds in isolation, without PYTHONPATH tricks.
+# Job 2: Clean Wheel Build & Package Isolation Verification (Outside Checkout)
+# Builds a wheel and source distribution, verifies archive contents directly,
+# and validates installation and imports from a clean directory outside the
+# repository checkout with no PYTHONPATH workarounds.
 # ---------------------------------------------------------------------------
   package-install:
-    name: "Package Install — Python ${{ matrix.python-version }}"
+    name: "Clean Wheel & Sdist Verification — Python ${{ matrix.python-version }}"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Upgrade pip and install build tools
-        run: python -m pip install --upgrade pip setuptools>=77.0 wheel
-
-      - name: Install package in editable mode (no PYTHONPATH)
-        run: pip install -e ".[symbolic]" --no-cache-dir
-
-      - name: Verify package is importable after install
         run: |
-          python -c "import reverse_forge; print('reverse_forge version:', reverse_forge.__version__)"
-          python -c "from reverse_forge.provenance import ScopeLedger; print('ScopeLedger OK')"
-          python -c "from reverse_forge.firebase_sync import FirebaseAuthManager; print('FirebaseAuthManager OK')"
-          python -c "from reverse_forge.pipeline import PipelineStateMachine; print('PipelineStateMachine OK')"
+          set -euo pipefail
+          python -m pip install --upgrade pip "setuptools>=77.0" "packaging>=24.2" wheel build
 
-      - name: Verify package does NOT include rust_core or tests
+      - name: Build wheel and sdist into isolated /tmp/rf_dist
         run: |
-          python -c "
-          import importlib, sys
-          # rust_core must NOT be a Python package
+          set -euo pipefail
+          rm -rf /tmp/rf_dist build reverse_forge.egg-info
+          mkdir -p /tmp/rf_dist
+          python -m build --wheel --sdist --outdir /tmp/rf_dist .
+          ls -la /tmp/rf_dist
+
+      - name: Verify wheel archive contents exclude rust_core, tests, and docs
+        run: |
+          set -euo pipefail
+          python -c '
+          import glob, zipfile
+          wheels = glob.glob("/tmp/rf_dist/reverse_forge-*.whl")
+          assert len(wheels) == 1, f"Expected exactly 1 wheel, found: {wheels}"
+          with zipfile.ZipFile(wheels[0]) as zf:
+              names = zf.namelist()
+              top_dirs = {n.split("/")[0] for n in names if "/" in n}
+              print("Wheel top-level entries:", sorted(top_dirs))
+              assert "reverse_forge" in top_dirs, "reverse_forge missing from wheel"
+              for forbidden in ("rust_core", "tests", "docs", ".github"):
+                  assert forbidden not in top_dirs, f"Forbidden directory {forbidden!r} packaged in wheel"
+          '
+
+      - name: Install wheel and verify imports from clean directory outside checkout
+        run: |
+          set -euo pipefail
+          unset PYTHONPATH
+          python -m pip install --no-cache-dir /tmp/rf_dist/reverse_forge-*.whl
+          mkdir -p /tmp/rf_clean_verify
+          cd /tmp/rf_clean_verify
+          python -c '
+          import os, sys
+          import reverse_forge
+          from reverse_forge.authorization import CentralAuthorizationBoundary, ApprovalIssuer, HILKeyRing
+          from reverse_forge.firebase_sync import FirebaseAuthManager, ProductionFirestoreStorageAdapter
+          from reverse_forge.pipeline import PipelineStateMachine
+          from reverse_forge.provenance import ScopeLedger
+
+          pkg_path = os.path.abspath(reverse_forge.__file__)
+          workspace = os.environ.get("GITHUB_WORKSPACE", "")
+          print("Installed reverse_forge path:", pkg_path)
+          if workspace:
+              assert not pkg_path.startswith(os.path.abspath(workspace)), (
+                  f"reverse_forge imported from checkout {workspace} instead of site-packages: {pkg_path}"
+              )
           try:
               import rust_core
-              raise AssertionError('rust_core should not be importable as a Python package')
+              raise SystemExit("FAIL: rust_core should not be importable outside checkout")
           except ModuleNotFoundError:
-              print('PASS: rust_core is not a Python package')
-          "
+              print("PASS: Clean isolated wheel installation verified outside checkout")
+          '
 
 # ---------------------------------------------------------------------------
-# Job 3: Security & regression test matrix
+# Job 3: Security & Regression Test Matrix
 # Requires both prior jobs to succeed before executing.
 # ---------------------------------------------------------------------------
   python-security-and-regression:
@@ -102,78 +152,82 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Install package and test dependencies
         run: |
-          python -m pip install --upgrade pip setuptools>=77.0
-          pip install "pefile>=2023.2.7" "capstone>=5.0.0" "z3-solver>=4.12.0" \
-                      "pyjwt>=2.8.0" "cryptography>=41.0.0" pytest
-          pip install -e .
+          set -euo pipefail
+          python -m pip install --upgrade pip "setuptools>=77.0" "packaging>=24.2" wheel
+          python -m pip install "pefile>=2023.2.7" "capstone>=5.0.0" "z3-solver>=4.12.0" \
+                                "pyjwt>=2.8.0" "cryptography>=41.0.0" pytest
+          python -m pip install --no-cache-dir .
 
-      - name: "[P0] Package discovery and import sanity"
+      - name: "[P0] Phase 4.1 Trust Boundary, HIL Signing, Atomic Replay & Entry-Point Suite"
         env:
-          PYTHONUTF8: "1"
-        run: |
-          python -c "import reverse_forge; print('Package OK:', reverse_forge.__version__)"
-          python -c "
-          try:
-              import rust_core
-              raise SystemExit('FAIL: rust_core must not be importable as Python package')
-          except ModuleNotFoundError:
-              print('PASS: rust_core not importable as Python package')
-          "
-
-      - name: "[P0] Authentication — fail-closed JWT & RBAC regression"
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          PYTHONUTF8: "1"
-        run: pytest tests/test_firebase_sync.py tests/test_phase4_auth_hardening.py -v --tb=short
-
-      - name: "[P0] Scope Ledger & HIL authorization regression"
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          PYTHONUTF8: "1"
-        run: pytest tests/test_security_regressions.py -v --tb=short
-
-      - name: "[P1] Phase 3 E2E trust boundary suite"
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          PYTHONUTF8: "1"
-        run: pytest tests/test_phase3_e2e_trust_boundary.py -v --tb=short
-
-      - name: "[P1] Phase 4 end-to-end acceptance test"
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          PYTHONUTF8: "1"
-        run: pytest tests/test_phase4_e2e_acceptance.py -v --tb=short
-
-      - name: "[P1] Differential analysis validation (ground truth)"
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          PYTHONUTF8: "1"
-        run: pytest tests/test_differential_analysis_validation.py -v --tb=short
-
-      - name: "[P1] Native backend ABI integrity"
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          PYTHONUTF8: "1"
-        run: pytest tests/test_phase86_90_rust_native_core.py -v --tb=short
-
-      - name: "[P1] Full test suite (all 382+ tests)"
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          PYTHONUTF8: "1"
-        run: pytest -v --tb=short
-
-      - name: "[SMOKE] CLI tool availability matrix"
-        env:
-          PYTHONPATH: ${{ github.workspace }}
           PYTHONUTF8: "1"
         run: |
+          set -euo pipefail
+          pytest tests/test_phase4_auth_hardening.py tests/test_phase4_authorization_bypass.py -v --tb=short
+
+      - name: "[P0] Authentication — Fail-Closed JWT, Role & Tenant Isolation Suite"
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          pytest tests/test_firebase_sync.py -v --tb=short
+
+      - name: "[P0] Scope Ledger & HIL Authorization Regression"
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          pytest tests/test_security_regressions.py -v --tb=short
+
+      - name: "[P1] Phase 3 E2E Trust Boundary Suite"
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          pytest tests/test_phase3_e2e_trust_boundary.py -v --tb=short
+
+      - name: "[P1] Phase 4 End-to-End Acceptance Test"
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          pytest tests/test_phase4_e2e_acceptance.py -v --tb=short
+
+      - name: "[P1] Differential Analysis Validation (Ground Truth)"
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          pytest tests/test_differential_analysis_validation.py -v --tb=short
+
+      - name: "[P1] Native Backend ABI Integrity"
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          pytest tests/test_phase86_90_rust_native_core.py -v --tb=short
+
+      - name: "[P1] Full Regression Test Suite"
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
+          pytest -v --tb=short
+
+      - name: "[SMOKE] CLI Tool Availability Matrix"
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -euo pipefail
           python -m reverse_forge.cli detect-tools
           python -m reverse_forge.cli remediate --cwe CWE-120 --symbol parse_input

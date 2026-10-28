@@ -1,7 +1,7 @@
 """
-R3V3R53//F0RG3 — Phase 4 End-to-End Deterministic Acceptance Test Suite
-========================================================================
-Implements the 13-step deterministic local workflow defined in Phase 4 §8:
+R3V3R53//F0RG3 — Phase 4 & 4.1 End-to-End Deterministic Acceptance Test Suite
+=============================================================================
+Implements the 13-step deterministic local workflow defined in Phase 4 §8 & Phase 4.1 §9:
   1. Creates a benign test binary from known source.
   2. Computes and verifies its SHA-256.
   3. Authenticates a valid test principal.
@@ -47,8 +47,10 @@ from reverse_forge.firebase_sync import (
     FirestoreArtifactDocument,
     FirestoreFindingDocument,
     LocalSimulationPersistenceAdapter,
+    PersistencePermissionError,
     ProductionFirestoreStorageAdapter,
     UserRole,
+    jwt,
 )
 from reverse_forge.pipeline import (
     AutonomyLevel,
@@ -124,7 +126,6 @@ class TestPhase4EndToEndAcceptance(unittest.TestCase):
         # ---------------------------------------------------------------------
         sha256 = hashlib.sha256(raw_bytes).hexdigest()
         self.assertEqual(len(sha256), 64)
-        hasher_md5 = hashlib.md5(raw_bytes).hexdigest()
 
         # ---------------------------------------------------------------------
         # Step 3: Authenticate valid test principal
@@ -137,7 +138,6 @@ class TestPhase4EndToEndAcceptance(unittest.TestCase):
             allowed_algorithms=["HS256"],
             trusted_tenants={"tenant_alpha", "tenant_beta"},
         )
-        import jwt
         token_claims = {
             "sub": "analyst-007",
             "email": "analyst@tenant-alpha.com",
@@ -152,6 +152,7 @@ class TestPhase4EndToEndAcceptance(unittest.TestCase):
         principal = auth_mgr.verify_bearer_token(f"Bearer {token}")
         self.assertIsNotNone(principal)
         self.assertTrue(principal.is_verified)
+        self.assertTrue(principal.is_cryptographically_verified())
 
         # ---------------------------------------------------------------------
         # Step 4: Confirm principal's role, tenant and scope
@@ -311,10 +312,14 @@ class TestPhase4EndToEndAcceptance(unittest.TestCase):
         # ---------------------------------------------------------------------
         # Step 11: Attempt unauthorized cross-tenant access and confirm denial
         # ---------------------------------------------------------------------
-        # Cross-tenant read from storage
-        cross_tenant_art = storage_adapter.get_artifact(sha256, "unauthorized_tenant_gamma")
         if backend_choice == "simulation":
+            cross_tenant_art = storage_adapter.get_artifact(sha256, "unauthorized_tenant_gamma")
             self.assertIsNone(cross_tenant_art)
+        else:
+            # In ProductionFirestoreStorageAdapter, if a snapshot with tenant_alpha is returned under
+            # unauthorized_tenant_gamma, Phase 4.1 tenant ownership validation raises PersistencePermissionError
+            with self.assertRaises(PersistencePermissionError):
+                storage_adapter.get_artifact(sha256, "unauthorized_tenant_gamma")
 
         # Cross-tenant request to Central Authorization Boundary
         permitted, decision, reason, _ = self.boundary.evaluate_request(

@@ -177,9 +177,28 @@ class TestHardenedThreadedGUIWorkbenchServer(unittest.TestCase):
             self.assertIn("authenticated_user", c_st)
 
     def test_api_cloud_sync_execution(self):
+        from reverse_forge.gui_server import firebase_sync
+        from reverse_forge.firebase_sync import jwt
+        jwt_secret = "v32_cloud_jwt_secret_32_bytes_minimum_len!!"
+        firebase_sync.auth.verification_key = jwt_secret
+        firebase_sync.auth.allowed_algorithms = ["HS256"]
+        token = jwt.encode(
+            {
+                "sub": "analyst_v32",
+                "email": "analyst@v32.local",
+                "role": "ANALYST",
+                "tenant_id": "default_tenant",
+                "iss": firebase_sync.auth.expected_issuer,
+                "aud": firebase_sync.auth.expected_audience,
+                "exp": time.time() + 3600,
+            },
+            jwt_secret,
+            algorithm="HS256",
+        )
         encoded = urllib.parse.quote(self.test_file.name)
         url = f"http://127.0.0.1:{self.port}/api/cloud/sync?path={encoded}"
-        with urllib.request.urlopen(url) as resp:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req) as resp:
             self.assertEqual(resp.status, 200)
             data = json.loads(resp.read().decode("utf-8"))
             self.assertEqual(data["status"], "ok")

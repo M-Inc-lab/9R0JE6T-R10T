@@ -66,58 +66,107 @@ class ToolchainInstaller:
             json.dump(data, f, indent=2)
 
     def detect_all(self) -> Dict[str, Any]:
+        """
+        Accurately detect installed external reverse-engineering tools (Radare2, Ghidra,
+        IDA Pro, Rizin, Cutter, and system disassemblers). Never claims a tool is available
+        when its binary is absent on the host.
+        """
         manifest = self.get_manifest()
         tools = {
             "radare2": self._find_r2(manifest),
             "ghidra": self._find_ghidra(manifest),
+            "ida": self._find_ida(manifest),
+            "rizin": self._find_rizin(manifest),
+            "cutter": self._find_cutter(manifest),
             "python": {"available": True, "path": sys.executable},
-            "system_disassemblers": self._find_system_disassemblers()
+            "system_disassemblers": self._find_system_disassemblers(),
         }
         return tools
 
     def _find_r2(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
         sys_path = shutil.which("r2") or shutil.which("radare2")
-        if sys_path:
+        if sys_path and os.path.isfile(sys_path):
             return {"available": True, "path": sys_path, "type": "system"}
 
         r2_bin = manifest.get("radare2", {}).get("binary_path")
-        if r2_bin and os.path.exists(r2_bin):
+        if r2_bin and os.path.isfile(r2_bin):
             return {"available": True, "path": r2_bin, "type": "managed"}
 
         for root, _, files in os.walk(TOOLS_DIR):
             for file in files:
                 if file in ("radare2.exe", "r2.exe", "r2"):
                     candidate = os.path.join(root, file)
-                    return {"available": True, "path": candidate, "type": "managed"}
+                    if os.path.isfile(candidate):
+                        return {"available": True, "path": candidate, "type": "managed"}
 
         return {"available": False, "path": None, "type": None}
 
     def _find_ghidra(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
+        env_path = os.environ.get("GHIDRA_HEADLESS_PATH", "").strip()
+        if env_path and os.path.isfile(env_path):
+            return {"available": True, "path": env_path, "type": "env"}
+
         sys_path = shutil.which("analyzeHeadless")
         if not sys_path and shutil.which("ghidra"):
             g_path = os.path.realpath(shutil.which("ghidra"))
             candidate = os.path.join(os.path.dirname(g_path), "support", "analyzeHeadless")
-            if os.path.exists(candidate):
+            if os.path.isfile(candidate):
                 sys_path = candidate
-            elif os.path.exists("/usr/share/ghidra/support/analyzeHeadless"):
+            elif os.path.isfile("/usr/share/ghidra/support/analyzeHeadless"):
                 sys_path = "/usr/share/ghidra/support/analyzeHeadless"
-            else:
-                sys_path = shutil.which("ghidra")
-        elif not sys_path and os.path.exists("/usr/share/ghidra/support/analyzeHeadless"):
+        elif not sys_path and os.path.isfile("/usr/share/ghidra/support/analyzeHeadless"):
             sys_path = "/usr/share/ghidra/support/analyzeHeadless"
 
-        if sys_path:
+        if sys_path and os.path.isfile(sys_path):
             return {"available": True, "path": sys_path, "type": "system"}
 
         ghidra_bin = manifest.get("ghidra", {}).get("binary_path")
-        if ghidra_bin and os.path.exists(ghidra_bin):
+        if ghidra_bin and os.path.isfile(ghidra_bin):
             return {"available": True, "path": ghidra_bin, "type": "managed"}
 
         for root, _, files in os.walk(TOOLS_DIR):
             for file in files:
                 if file in ("analyzeHeadless.bat", "analyzeHeadless"):
                     candidate = os.path.join(root, file)
-                    return {"available": True, "path": candidate, "type": "managed"}
+                    if os.path.isfile(candidate):
+                        return {"available": True, "path": candidate, "type": "managed"}
+
+        return {"available": False, "path": None, "type": None}
+
+    def _find_ida(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
+        env_path = os.environ.get("IDA_HEADLESS_PATH", "").strip()
+        if env_path and os.path.isfile(env_path):
+            return {"available": True, "path": env_path, "type": "env"}
+
+        sys_path = shutil.which("idat64") or shutil.which("idat")
+        if sys_path and os.path.isfile(sys_path):
+            return {"available": True, "path": sys_path, "type": "system"}
+
+        ida_bin = manifest.get("ida", {}).get("binary_path")
+        if ida_bin and os.path.isfile(ida_bin):
+            return {"available": True, "path": ida_bin, "type": "managed"}
+
+        return {"available": False, "path": None, "type": None}
+
+    def _find_rizin(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
+        sys_path = shutil.which("rizin") or shutil.which("rz-bin")
+        if sys_path and os.path.isfile(sys_path):
+            return {"available": True, "path": sys_path, "type": "system"}
+
+        rz_bin = manifest.get("rizin", {}).get("binary_path")
+        if rz_bin and os.path.isfile(rz_bin):
+            return {"available": True, "path": rz_bin, "type": "managed"}
+
+        return {"available": False, "path": None, "type": None}
+
+    def _find_cutter(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
+        sys_path = shutil.which("cutter") or shutil.which("Cutter")
+        if sys_path and os.path.isfile(sys_path):
+            return {"available": True, "path": sys_path, "type": "system"}
+
+        cutter_bin = manifest.get("cutter", {}).get("binary_path")
+        if cutter_bin and os.path.isfile(cutter_bin):
+            return {"available": True, "path": cutter_bin, "type": "managed"}
 
         return {"available": False, "path": None, "type": None}
 
@@ -126,7 +175,9 @@ class ToolchainInstaller:
             "objdump": shutil.which("objdump") is not None,
             "dumpbin": shutil.which("dumpbin") is not None,
             "gdb": shutil.which("gdb") is not None,
-            "pwsh": shutil.which("pwsh") is not None
+            "pwsh": shutil.which("pwsh") is not None,
+            "rizin": shutil.which("rizin") is not None,
+            "cutter": shutil.which("cutter") is not None,
         }
 
     def install_radare2(self, expected_sha256: Optional[str] = None) -> Dict[str, Any]:

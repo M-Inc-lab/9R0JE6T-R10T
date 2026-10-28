@@ -152,7 +152,48 @@ class TestPhase84To85MinidumpPEUnmapperAndTranscendentCLI(unittest.TestCase):
                 tmp_path = tf.name
 
             base_url = f"http://127.0.0.1:{port}"
-            with urllib.request.urlopen(f"{base_url}/api/force-exec?path={tmp_path}") as r_fe:
+            from reverse_forge.gui_server import firebase_sync
+            from reverse_forge.firebase_sync import jwt
+            from reverse_forge.authorization import ApprovalIssuer, HILKeyRing, OperationType, reset_authorization_boundary
+            from reverse_forge.provenance import ProvenanceManager
+            import time as _time
+            jwt_secret = "phase85_jwt_secret_32_bytes_minimum_length!!"
+            hil_secret = "phase85_hil_secret_32_bytes_minimum_length!!"
+            firebase_sync.auth.verification_key = jwt_secret
+            firebase_sync.auth.allowed_algorithms = ["HS256"]
+            ring = HILKeyRing(keys={"default": hil_secret}, active_key_id="default")
+            reset_authorization_boundary(signing_key=ring)
+            token = jwt.encode(
+                {
+                    "sub": "analyst_p85",
+                    "email": "analyst@lab.local",
+                    "role": "ANALYST",
+                    "tenant_id": "default_tenant",
+                    "iss": firebase_sync.auth.expected_issuer,
+                    "aud": firebase_sync.auth.expected_audience,
+                    "exp": _time.time() + 3600,
+                },
+                jwt_secret,
+                algorithm="HS256",
+            )
+            principal = firebase_sync.auth.verify_bearer_token(f"Bearer {token}")
+            target_sha = ProvenanceManager.compute_hashes(tmp_path)["sha256"]
+            grant = ApprovalIssuer(key_ring=ring).issue_grant(
+                approver=principal,
+                operation=OperationType.DYNAMIC_SANDBOX,
+                target_path=tmp_path,
+                target_sha256=target_sha,
+                tenant_id="default_tenant",
+                parameters={"path": os.path.realpath(tmp_path)},
+            )
+            fe_req = urllib.request.Request(
+                f"{base_url}/api/force-exec?path={tmp_path}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-HIL-Approval-Grant": json.dumps(grant.to_dict()),
+                },
+            )
+            with urllib.request.urlopen(fe_req) as r_fe:
                 fe_doc = json.loads(r_fe.read().decode("utf-8"))
             self.assertEqual(fe_doc["status"], "ok")
             self.assertGreaterEqual(fe_doc["visor_report"]["total_paths_explored"], 1)

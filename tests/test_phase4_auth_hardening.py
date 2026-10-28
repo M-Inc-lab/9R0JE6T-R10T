@@ -1,28 +1,19 @@
 """
-R3V3R53//F0RG3 — Phase 4 Authentication Hardening Tests
-=========================================================
-Adversarial regression suite verifying all 18 required test cases from the
-Phase 4 specification §3 (P0 — Eliminate authentication privilege escalation).
-
-Test index (matches Phase 4 spec order):
-  T-01  Missing authorization header
-  T-02  Malformed token (not 3-part JWT)
-  T-03  Tampered signature
-  T-04  Unsigned token (alg=none)
-  T-05  Unsupported signing algorithm (alg=HS384 not in allowlist)
-  T-06  Expired token
-  T-07  Future nbf
-  T-08  Incorrect issuer
-  T-09  Incorrect audience
-  T-10  Missing required claims (no sub)
-  T-11  Forged LEAD_ARCHITECT role in unverified context
-  T-12  Forged tenant identifier
-  T-13  Unverified context attempting modification
-  T-14  Mock mode enabled in production
-  T-15  Missing verification configuration in production
-  T-16  Valid token with unauthorized role (VIEWER cannot modify)
-  T-17  Cross-tenant artifact access
-  T-18  Token/key configuration errors (bad key format)
+R3V3R53//F0RG3 — Phase 4 & Phase 4.1 Authentication & Persistence Hardening Tests
+==================================================================================
+Adversarial regression suite verifying all 18 test cases from Phase 4 §3 plus
+all Phase 4.1 §4 (JWT authentication & tenant authorization) and §7 (Persistence
+boundary hardening) requirements:
+  T-01..T-18: Phase 4 core authentication and adapter contracts
+  P41-AUTH-01: Default allowed_algorithms is RS256 only (explicit provider default)
+  P41-AUTH-02: RSA (RS256) and ECDSA (ES256) cryptographic signature verification
+  P41-AUTH-03: Algorithm/key compatibility checks (RSA public key rejected for HS256; symmetric secret rejected for RS256/ES256)
+  P41-AUTH-04: Malformed claim types rejected (boolean exp/nbf, integer sub, list role, future iat)
+  P41-AUTH-05: Unknown/unrecognized role values strictly rejected (never defaulted to ANALYST)
+  P41-AUTH-06: Server-side tenant_membership_policy enforcement and cross-tenant substitution rejection
+  P41-AUTH-07: Direct AuthUserContext(..., is_verified=True) construction and post-construction field mutation rejected
+  P41-AUTH-08: SharedRevocationStore cross-instance / restart persistence
+  P41-PERSIST-01: Principal-derived tenant ownership, path traversal / URI scheme rejection, and NotFound vs PermissionDenied vs Unavailable distinction
 """
 
 from __future__ import annotations
@@ -31,19 +22,35 @@ import base64
 import hashlib
 import json
 import os
-import struct
 import tempfile
 import time
 import unittest
-from unittest.mock import patch, MagicMock
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
+from reverse_forge.firebase_sync import (
+    AuthUserContext,
+    FirebaseAuthManager,
+    FirebaseSyncManager,
+    FirestoreArtifactDocument,
+    FirestoreJobDocument,
+    LocalSimulationPersistenceAdapter,
+    PersistencePermissionError,
+    PersistenceUnavailableError,
+    ProductionFirestoreStorageAdapter,
+    SharedRevocationStore,
+    UserRole,
+    jwt,
+    validate_artifact_sha256,
+    validate_document_id,
+    validate_storage_blob_path,
+    validate_tenant_id,
+)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
 
 def _make_jwt(header: dict, payload: dict, signature: bytes = b"") -> str:
     h = _b64url(json.dumps(header).encode())
@@ -51,26 +58,22 @@ def _make_jwt(header: dict, payload: dict, signature: bytes = b"") -> str:
     s = _b64url(signature)
     return f"{h}.{p}.{s}"
 
+
 def _now() -> int:
     return int(time.time())
 
 
-# ---------------------------------------------------------------------------
-# T-01 through T-18
-# ---------------------------------------------------------------------------
-
 class TestPhase4AuthHardening(unittest.TestCase):
-    """Phase 4 §3: All 18 adversarial authentication test cases."""
+    """Phase 4 §3 & Phase 4.1 §4: Adversarial authentication test cases."""
 
     def setUp(self):
-        from reverse_forge.firebase_sync import FirebaseAuthManager
-        # Non-production auth manager with a known HMAC key for controlled tests
+        self.secret = "supersecretkey-for-phase4-tests-32bytes!"
         self.auth = FirebaseAuthManager(
             project_id="test-project",
             expected_issuer="https://securetoken.google.com/test-project",
             expected_audience="test-project",
-            verification_key="supersecretkey-for-phase4-tests",
-            allowed_algorithms=["HS256", "RS256", "ES256"],
+            verification_key=self.secret,
+            allowed_algorithms=["HS256"],
             allow_dev_mock=False,
         )
 
@@ -105,11 +108,10 @@ class TestPhase4AuthHardening(unittest.TestCase):
             "aud": "test-project",
             "exp": _now() + 3600,
         }
-        # Build a structurally valid JWT but with a corrupted signature
         tampered = _make_jwt(
             {"alg": "HS256", "typ": "JWT"},
             payload,
-            signature=b"INVALIDSIGNATUREBYTES"
+            signature=b"INVALIDSIGNATUREBYTES",
         )
         self.assertIsNone(self.auth.verify_bearer_token(f"Bearer {tampered}"))
 
@@ -147,9 +149,9 @@ class TestPhase4AuthHardening(unittest.TestCase):
             "sub": "uid-expired",
             "iss": "https://securetoken.google.com/test-project",
             "aud": "test-project",
-            "exp": _now() - 7200,  # 2 hours ago
+            "exp": _now() - 7200,
         }
-        token = _make_jwt({"alg": "HS256"}, payload)
+        token = jwt.encode(payload, self.secret, algorithm="HS256")
         self.assertIsNone(self.auth.verify_bearer_token(f"Bearer {token}"))
 
     # T-07 ─────────────────────────────────────────────────────────────────
@@ -160,9 +162,9 @@ class TestPhase4AuthHardening(unittest.TestCase):
             "iss": "https://securetoken.google.com/test-project",
             "aud": "test-project",
             "exp": _now() + 7200,
-            "nbf": _now() + 3600,  # valid only 1 hour from now
+            "nbf": _now() + 3600,
         }
-        token = _make_jwt({"alg": "HS256"}, payload)
+        token = jwt.encode(payload, self.secret, algorithm="HS256")
         self.assertIsNone(self.auth.verify_bearer_token(f"Bearer {token}"))
 
     # T-08 ─────────────────────────────────────────────────────────────────
@@ -174,7 +176,7 @@ class TestPhase4AuthHardening(unittest.TestCase):
             "aud": "test-project",
             "exp": _now() + 3600,
         }
-        token = _make_jwt({"alg": "HS256"}, payload)
+        token = jwt.encode(payload, self.secret, algorithm="HS256")
         self.assertIsNone(self.auth.verify_bearer_token(f"Bearer {token}"))
 
     # T-09 ─────────────────────────────────────────────────────────────────
@@ -186,7 +188,7 @@ class TestPhase4AuthHardening(unittest.TestCase):
             "aud": "different-project-id",
             "exp": _now() + 3600,
         }
-        token = _make_jwt({"alg": "HS256"}, payload)
+        token = jwt.encode(payload, self.secret, algorithm="HS256")
         self.assertIsNone(self.auth.verify_bearer_token(f"Bearer {token}"))
 
     # T-10 ─────────────────────────────────────────────────────────────────
@@ -196,9 +198,8 @@ class TestPhase4AuthHardening(unittest.TestCase):
             "iss": "https://securetoken.google.com/test-project",
             "aud": "test-project",
             "exp": _now() + 3600,
-            # no 'sub'
         }
-        token = _make_jwt({"alg": "HS256"}, payload)
+        token = jwt.encode(payload, self.secret, algorithm="HS256")
         self.assertIsNone(self.auth.verify_bearer_token(f"Bearer {token}"))
 
     def test_t10b_missing_exp_claim(self):
@@ -207,86 +208,79 @@ class TestPhase4AuthHardening(unittest.TestCase):
             "sub": "uid-noexp",
             "iss": "https://securetoken.google.com/test-project",
             "aud": "test-project",
-            # no 'exp'
         }
-        token = _make_jwt({"alg": "HS256"}, payload)
+        token = jwt.encode(payload, self.secret, algorithm="HS256")
         self.assertIsNone(self.auth.verify_bearer_token(f"Bearer {token}"))
 
     # T-11 ─────────────────────────────────────────────────────────────────
     def test_t11_forged_lead_architect_role_unverified(self):
         """An unverified context with role=LEAD_ARCHITECT must never pass can_modify/is_lead."""
-        from reverse_forge.firebase_sync import AuthUserContext, UserRole
-        # Attacker constructs an unverified context directly with elevated role
         ctx = AuthUserContext(
             uid="attacker-uid",
             email="attacker@evil.com",
             role=UserRole.LEAD_ARCHITECT,
             tenant_id="victim-tenant",
             token_claims={"role": "LEAD_ARCHITECT"},
-            is_verified=False,  # Not verified
+            is_verified=False,
         )
-        # Despite elevated role, unverified must deny all privileged ops
         self.assertFalse(ctx.can_modify(), "Unverified LEAD_ARCHITECT must not pass can_modify()")
         self.assertFalse(ctx.is_lead(), "Unverified LEAD_ARCHITECT must not pass is_lead()")
 
     def test_t11b_forged_role_string_in_jwt_payload(self):
-        """Attacker-controlled 'role' string in JWT payload must be constrained to enum values."""
-        from reverse_forge.firebase_sync import AuthUserContext, UserRole
-        # If verify_bearer_token constructs a role from a string, invalid values fall back to ANALYST
-        # Test the role resolution logic: an unknown role must default to ANALYST
-        # (not escalate to LEAD_ARCHITECT)
-        test_role_strings = ["SUPER_ADMIN", "root", "administrator", "OWNER", "GOD"]
-        for role_str in test_role_strings:
-            resolved = getattr(UserRole, role_str.upper(), UserRole.ANALYST)
-            # Must resolve to ANALYST (default), not LEAD_ARCHITECT
-            self.assertNotEqual(resolved, UserRole.LEAD_ARCHITECT,
-                                f"Unknown role '{role_str}' must not resolve to LEAD_ARCHITECT")
+        """Phase 4.1 §4: Unrecognized or malformed 'role' strings in JWT payload must be strictly rejected."""
+        test_role_strings = ["SUPER_ADMIN", "root", "administrator", "OWNER", "GOD", "", "analyst;drop", 123, ["ANALYST"]]
+        for role_val in test_role_strings:
+            with self.assertRaises(ValueError):
+                FirebaseAuthManager.resolve_role(role_val)
+            payload = {
+                "sub": "attacker-uid",
+                "iss": "https://securetoken.google.com/test-project",
+                "aud": "test-project",
+                "exp": _now() + 3600,
+                "role": role_val,
+            }
+            token = jwt.encode(payload, self.secret, algorithm="HS256")
+            self.assertIsNone(
+                self.auth.verify_bearer_token(f"Bearer {token}"),
+                f"Token with invalid role {role_val!r} must be rejected",
+            )
 
     # T-12 ─────────────────────────────────────────────────────────────────
     def test_t12_forged_tenant_identifier(self):
         """Attacker-claimed tenant_id in JWT must be validated against trusted_tenants."""
-        from reverse_forge.firebase_sync import FirebaseAuthManager
-        # Auth manager with restricted trusted_tenants
         auth = FirebaseAuthManager(
             project_id="test-project",
             expected_issuer="https://securetoken.google.com/test-project",
             expected_audience="test-project",
-            verification_key="supersecretkey-for-phase4-tests",
+            verification_key=self.secret,
             allowed_algorithms=["HS256"],
             trusted_tenants={"legitimate-tenant"},
         )
-        # Build a token claiming to belong to victim-tenant
         payload = {
             "sub": "attacker-uid",
             "iss": "https://securetoken.google.com/test-project",
             "aud": "test-project",
             "exp": _now() + 3600,
-            "tenant_id": "victim-tenant",  # Forged!
+            "tenant_id": "victim-tenant",
         }
-        token = _make_jwt({"alg": "HS256"}, payload)
-        # Even if the token passes structural checks, unauthorized tenant must reject
+        token = jwt.encode(payload, self.secret, algorithm="HS256")
         result = auth.verify_bearer_token(f"Bearer {token}")
-        # Either None (rejected at jwt.decode due to sig mismatch) or
-        # None (rejected at tenant check). Either way must be None.
         self.assertIsNone(result, "Forged tenant_id not in trusted_tenants must be rejected")
 
     # T-13 ─────────────────────────────────────────────────────────────────
     def test_t13_unverified_context_modification_denied(self):
         """FirebaseSyncManager must reject modification from unverified AuthUserContext."""
-        from reverse_forge.firebase_sync import FirebaseSyncManager, AuthUserContext, UserRole
         mgr = FirebaseSyncManager(force_local_sim=True)
-        # Construct unverified user (is_verified=False)
         unverified_user = AuthUserContext(
             uid="unverified-uid",
             email="unverified@test.com",
             role=UserRole.ANALYST,
             tenant_id="test-tenant",
-            is_verified=False,  # Key: not verified
+            is_verified=False,
         )
-        # Attempting modification must raise PermissionError
         with self.assertRaises(PermissionError):
             mgr.sync_artifact(
-                sha256="aabbcc" * 10,
+                sha256="a" * 64,
                 filename="test.bin",
                 size_bytes=64,
                 format_name="ELF",
@@ -298,7 +292,6 @@ class TestPhase4AuthHardening(unittest.TestCase):
 
     def test_t13b_unverified_viewer_modification_denied(self):
         """Unverified VIEWER must also be denied modification."""
-        from reverse_forge.firebase_sync import FirebaseSyncManager, AuthUserContext, UserRole
         mgr = FirebaseSyncManager(force_local_sim=True)
         viewer = AuthUserContext(
             uid="viewer-uid",
@@ -308,53 +301,49 @@ class TestPhase4AuthHardening(unittest.TestCase):
             is_verified=False,
         )
         with self.assertRaises(PermissionError):
-            mgr.sync_findings("aabbcc" * 10, [{"cwe_id": "CWE-120"}], viewer)
+            mgr.sync_findings("a" * 64, [{"cwe_id": "CWE-120"}], viewer)
 
     # T-14 ─────────────────────────────────────────────────────────────────
     def test_t14_mock_mode_in_production_rejected(self):
         """Mock tokens must be rejected when REVERSE_FORGE_ENV=production."""
-        from reverse_forge.firebase_sync import FirebaseAuthManager
         with patch.dict(os.environ, {
             "REVERSE_FORGE_ENV": "production",
             "FIREBASE_SERVICE_ACCOUNT_KEY": "fake_key_value",
         }):
             auth = FirebaseAuthManager(
                 project_id="prod-project",
-                verification_key="prod-key",
+                verification_key=self.secret,
+                allowed_algorithms=["HS256"],
             )
             self.assertTrue(auth.is_production, "Must detect production mode")
-            # Mock tokens must be flatly rejected in production
             self.assertIsNone(auth.verify_bearer_token("Bearer mock-token-analyst"))
             self.assertIsNone(auth.verify_bearer_token("Bearer dev-token-admin"))
             self.assertIsNone(auth.verify_bearer_token(None))
 
     def test_t14b_allow_dev_mock_true_rejected_in_production(self):
         """Even allow_dev_mock=True cannot enable mock tokens in production."""
-        from reverse_forge.firebase_sync import FirebaseAuthManager
         with patch.dict(os.environ, {
             "REVERSE_FORGE_ENV": "production",
             "FIREBASE_SERVICE_ACCOUNT_KEY": "fake_key",
         }):
             auth = FirebaseAuthManager(
                 project_id="prod-project",
-                verification_key="prod-key",
-                allow_dev_mock=True,  # Explicitly requested but in production
+                verification_key=self.secret,
+                allowed_algorithms=["HS256"],
+                allow_dev_mock=True,
             )
-            # Production mode must override allow_dev_mock for mock tokens
             result = auth.verify_bearer_token("Bearer mock-token-architect")
             self.assertIsNone(result, "Mock token must be rejected in production even with allow_dev_mock=True")
 
     # T-15 ─────────────────────────────────────────────────────────────────
     def test_t15_missing_verification_config_in_production(self):
         """In production without verification key, any real JWT must be rejected."""
-        from reverse_forge.firebase_sync import FirebaseAuthManager
         with patch.dict(os.environ, {
             "REVERSE_FORGE_ENV": "production",
-            "FIREBASE_SERVICE_ACCOUNT_KEY": "",  # Empty
-            "FIREBASE_JWT_VERIFICATION_KEY": "",  # No key
+            "FIREBASE_SERVICE_ACCOUNT_KEY": "",
+            "FIREBASE_JWT_VERIFICATION_KEY": "",
         }):
             auth = FirebaseAuthManager(project_id="prod-project")
-            # Structurally valid JWT but no key to verify signature
             payload = {
                 "sub": "uid-x",
                 "iss": "https://securetoken.google.com/prod-project",
@@ -362,13 +351,11 @@ class TestPhase4AuthHardening(unittest.TestCase):
                 "exp": _now() + 3600,
             }
             token = _make_jwt({"alg": "HS256"}, payload)
-            # Without verification key, must fail closed
             result = auth.verify_bearer_token(f"Bearer {token}")
             self.assertIsNone(result, "Missing production verification config must reject all real JWTs")
 
     def test_t15b_missing_verification_config_production_missing_header(self):
         """Missing auth header in production must return None."""
-        from reverse_forge.firebase_sync import FirebaseAuthManager
         with patch.dict(os.environ, {"REVERSE_FORGE_ENV": "production"}):
             auth = FirebaseAuthManager(project_id="prod-project")
             self.assertIsNone(auth.verify_bearer_token(None))
@@ -377,33 +364,28 @@ class TestPhase4AuthHardening(unittest.TestCase):
     # T-16 ─────────────────────────────────────────────────────────────────
     def test_t16_verified_viewer_cannot_modify(self):
         """A cryptographically verified VIEWER cannot execute modification operations."""
-        from reverse_forge.firebase_sync import AuthUserContext, UserRole
-        # Verified VIEWER (is_verified=True but role=VIEWER)
-        viewer = AuthUserContext(
+        viewer = self.auth.issue_verified_context(
             uid="viewer-uid",
             email="viewer@company.com",
             role=UserRole.VIEWER,
             tenant_id="company-tenant",
-            is_verified=True,  # Properly verified
         )
-        # VIEWER role must not pass can_modify()
+        self.assertTrue(viewer.is_cryptographically_verified())
         self.assertFalse(viewer.can_modify(), "Verified VIEWER must not pass can_modify()")
         self.assertFalse(viewer.is_lead(), "Verified VIEWER must not pass is_lead()")
 
     def test_t16b_verified_viewer_modification_raises_permission_error(self):
         """FirebaseSyncManager must raise PermissionError for VIEWER attempting modification."""
-        from reverse_forge.firebase_sync import FirebaseSyncManager, AuthUserContext, UserRole
         mgr = FirebaseSyncManager(force_local_sim=True)
-        viewer = AuthUserContext(
+        viewer = mgr.auth.issue_verified_context(
             uid="viewer-uid",
             email="viewer@test.com",
             role=UserRole.VIEWER,
             tenant_id="test-tenant",
-            is_verified=True,  # Verified but VIEWER role
         )
         with self.assertRaises(PermissionError):
             mgr.sync_artifact(
-                sha256="aabbcc" * 10,
+                sha256="a" * 64,
                 filename="test.bin",
                 size_bytes=64,
                 format_name="PE",
@@ -416,20 +398,12 @@ class TestPhase4AuthHardening(unittest.TestCase):
     # T-17 ─────────────────────────────────────────────────────────────────
     def test_t17_cross_tenant_artifact_access_denied(self):
         """Tenant B cannot read or modify Tenant A's artifacts through the sync manager."""
-        from reverse_forge.firebase_sync import (
-            FirebaseSyncManager, AuthUserContext, UserRole, FirestoreArtifactDocument
-        )
-        from datetime import datetime, timezone
-
         mgr = FirebaseSyncManager(force_local_sim=True)
-
-        # Tenant A analyst stores an artifact
-        tenant_a_user = AuthUserContext(
+        tenant_a_user = mgr.auth.issue_verified_context(
             uid="alice-uid",
             email="alice@tenant-a.com",
             role=UserRole.ANALYST,
             tenant_id="tenant-a",
-            is_verified=True,
         )
         sha = "deadbeef" * 8
         mgr.sync_artifact(
@@ -443,50 +417,43 @@ class TestPhase4AuthHardening(unittest.TestCase):
             user=tenant_a_user,
         )
 
-        # Tenant B tries to read Tenant A's artifact
-        tenant_b_user = AuthUserContext(
+        tenant_b_user = mgr.auth.issue_verified_context(
             uid="bob-uid",
             email="bob@tenant-b.com",
             role=UserRole.ANALYST,
             tenant_id="tenant-b",
-            is_verified=True,
         )
-        # Direct backend lookup: Tenant B must not retrieve Tenant A's artifact
+        self.assertIsNone(mgr.get_artifact(sha, user=tenant_b_user))
         result = mgr.backend.get_artifact(sha, tenant_id="tenant-b")
         self.assertIsNone(result, "Tenant B must not access Tenant A's artifact")
 
-        # Tenant A can still read it
         a_result = mgr.backend.get_artifact(sha, tenant_id="tenant-a")
         self.assertIsNotNone(a_result, "Tenant A must be able to read its own artifact")
 
     def test_t17b_cross_tenant_findings_access_denied(self):
         """Tenant B cannot read Tenant A's findings."""
-        from reverse_forge.firebase_sync import (
-            FirebaseSyncManager, AuthUserContext, UserRole
-        )
         mgr = FirebaseSyncManager(force_local_sim=True)
-        tenant_a_user = AuthUserContext(
-            uid="alice-uid", email="alice@a.com",
-            role=UserRole.ANALYST, tenant_id="tenant-alpha", is_verified=True,
+        tenant_a_user = mgr.auth.issue_verified_context(
+            uid="alice-uid",
+            email="alice@a.com",
+            role=UserRole.ANALYST,
+            tenant_id="tenant-alpha",
         )
         sha = "cafebabe" * 8
         mgr.sync_findings(sha, [{"cwe_id": "CWE-78", "title": "Command Injection"}], tenant_a_user)
 
-        # Tenant B query returns empty
         b_findings = mgr.backend.get_findings(sha, tenant_id="tenant-beta")
         self.assertEqual(b_findings, [], "Tenant B must not access Tenant A's findings")
 
     # T-18 ─────────────────────────────────────────────────────────────────
     def test_t18_key_configuration_error_bad_format(self):
         """Completely invalid key material must cause token verification to fail, not crash."""
-        from reverse_forge.firebase_sync import FirebaseAuthManager
-        # Auth manager with nonsense key
         auth = FirebaseAuthManager(
             project_id="test-project",
             expected_issuer="https://securetoken.google.com/test-project",
             expected_audience="test-project",
             verification_key="NOT_A_VALID_KEY\x00\x01\x02",
-            allowed_algorithms=["RS256"],  # RS256 requires PEM, not this garbage
+            allowed_algorithms=["RS256"],
         )
         payload = {
             "sub": "uid-x",
@@ -494,17 +461,15 @@ class TestPhase4AuthHardening(unittest.TestCase):
             "aud": "test-project",
             "exp": _now() + 3600,
         }
-        # The token claims RS256 but key is garbage — must fail cleanly
         token = _make_jwt({"alg": "RS256"}, payload)
         result = auth.verify_bearer_token(f"Bearer {token}")
         self.assertIsNone(result, "Bad key material must cause clean failure, not crash")
 
     def test_t18b_empty_verification_key_rejects_real_jwt(self):
         """Empty verification_key must reject all real JWTs regardless of environment."""
-        from reverse_forge.firebase_sync import FirebaseAuthManager
         auth = FirebaseAuthManager(
             project_id="test-project",
-            verification_key="",  # Empty key
+            verification_key="",
             allowed_algorithms=["HS256"],
         )
         payload = {
@@ -517,11 +482,10 @@ class TestPhase4AuthHardening(unittest.TestCase):
         result = auth.verify_bearer_token(f"Bearer {token}")
         self.assertIsNone(result, "Empty verification key must reject all real JWTs")
 
-    # ─── Additional boundary tests ────────────────────────────────────────
+    # ─── Additional Phase 4 & 4.1 boundary tests ──────────────────────────
 
-    def test_can_modify_requires_both_verified_and_correct_role(self):
-        """can_modify() requires is_verified=True AND ANALYST/LEAD_ARCHITECT role."""
-        from reverse_forge.firebase_sync import AuthUserContext, UserRole
+    def test_can_modify_requires_sealed_verification_and_correct_role(self):
+        """can_modify() requires sealed cryptographic verification AND ANALYST/LEAD_ARCHITECT role."""
         combos = [
             (True, UserRole.VIEWER, False),
             (False, UserRole.ANALYST, False),
@@ -530,15 +494,254 @@ class TestPhase4AuthHardening(unittest.TestCase):
             (True, UserRole.LEAD_ARCHITECT, True),
         ]
         for verified, role, expected in combos:
-            ctx = AuthUserContext(uid="u", email="e@x.com", role=role, is_verified=verified)
-            result = ctx.can_modify()
-            self.assertEqual(result, expected,
-                             f"can_modify() with verified={verified}, role={role} should be {expected}")
+            if verified:
+                ctx = self.auth.issue_verified_context(uid="u", email="e@x.com", role=role, tenant_id="tenant-a")
+            else:
+                ctx = AuthUserContext(uid="u", email="e@x.com", role=role, tenant_id="tenant-a", is_verified=False)
+            self.assertEqual(
+                ctx.can_modify(),
+                expected,
+                f"can_modify() with verified={verified}, role={role} should be {expected}",
+            )
+
+    def test_direct_object_construction_with_is_verified_true_cannot_bypass_seal(self):
+        """Phase 4.1 §4: Direct AuthUserContext(..., is_verified=True) construction is downgraded and unsealed."""
+        fabricated = AuthUserContext(
+            uid="attacker",
+            email="attacker@evil.com",
+            role=UserRole.LEAD_ARCHITECT,
+            tenant_id="tenant-a",
+            is_verified=True,
+        )
+        self.assertFalse(fabricated.is_verified)
+        self.assertFalse(fabricated.is_cryptographically_verified())
+        self.assertFalse(fabricated.can_modify())
+        self.assertFalse(fabricated.is_lead())
+
+        # Even if attacker mutates attributes after construction on a genuinely sealed context, seal breaks!
+        legit = self.auth.issue_verified_context(
+            uid="viewer-1",
+            email="viewer@tenant-a.com",
+            role=UserRole.VIEWER,
+            tenant_id="tenant-a",
+        )
+        self.assertTrue(legit.is_cryptographically_verified())
+        legit.role = UserRole.LEAD_ARCHITECT
+        self.assertFalse(legit.is_cryptographically_verified(), "Mutating role after sealing must invalidate seal")
+        self.assertFalse(legit.can_modify())
+        self.assertFalse(legit.is_lead())
+
+        legit2 = self.auth.issue_verified_context(
+            uid="analyst-1",
+            email="analyst@tenant-a.com",
+            role=UserRole.ANALYST,
+            tenant_id="tenant-a",
+        )
+        legit2.tenant_id = "victim-tenant"
+        self.assertFalse(legit2.is_cryptographically_verified(), "Mutating tenant_id after sealing must invalidate seal")
+
+    def test_default_provider_algorithm_is_rs256_only(self):
+        """Phase 4.1 §4: Default allowed_algorithms must be ['RS256'] for Firebase ID tokens."""
+        default_auth = FirebaseAuthManager(project_id="firebase-proj")
+        self.assertEqual(default_auth.allowed_algorithms, ["RS256"])
+
+    def test_rs256_and_es256_signature_verification_and_algorithm_confusion_blocked(self):
+        """Phase 4.1 §4: Verify RS256 and ES256 tokens and reject algorithm/key confusion."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+        rsa_priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        rsa_priv_pem = rsa_priv.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode("utf-8")
+        rsa_pub_pem = rsa_priv.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode("utf-8")
+
+        ec_priv = ec.generate_private_key(ec.SECP256R1())
+        ec_priv_pem = ec_priv.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode("utf-8")
+        ec_pub_pem = ec_priv.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode("utf-8")
+
+        claims = {
+            "sub": "rsa-user-01",
+            "email": "rsa@lab.org",
+            "role": "LEAD_ARCHITECT",
+            "tenant_id": "tenant_rsa",
+            "iss": "https://securetoken.google.com/test-project",
+            "aud": "test-project",
+            "exp": _now() + 3600,
+            "nbf": _now() - 5,
+        }
+
+        # 1. Valid RS256 token verified with RSA public key
+        rsa_auth = FirebaseAuthManager(
+            project_id="test-project",
+            verification_key=rsa_pub_pem,
+            allowed_algorithms=["RS256"],
+        )
+        rs256_token = jwt.encode(claims, rsa_priv_pem, algorithm="RS256")
+        rsa_user = rsa_auth.verify_bearer_token(f"Bearer {rs256_token}")
+        self.assertIsNotNone(rsa_user)
+        self.assertTrue(rsa_user.is_cryptographically_verified())
+        self.assertTrue(rsa_user.is_lead())
+
+        # 2. Algorithm confusion attack: signing HS256 token using RSA public key PEM as HMAC secret
+        confused_auth = FirebaseAuthManager(
+            project_id="test-project",
+            verification_key=rsa_pub_pem,
+            allowed_algorithms=["RS256", "HS256"],
+        )
+        with self.assertRaises(Exception):
+            jwt.encode(claims, rsa_pub_pem, algorithm="HS256")
+        import hmac as _hmac
+        hdr_b64 = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+        pay_b64 = _b64url(json.dumps(claims).encode())
+        signing_in = f"{hdr_b64}.{pay_b64}".encode("ascii")
+        forged_sig = _b64url(_hmac.new(rsa_pub_pem.encode("utf-8"), signing_in, hashlib.sha256).digest())
+        confused_token = f"{hdr_b64}.{pay_b64}.{forged_sig}"
+        self.assertIsNone(
+            confused_auth.verify_bearer_token(f"Bearer {confused_token}"),
+            "RSA public key must never be accepted as an HS256 HMAC secret",
+        )
+
+        # 3. Valid ES256 token verified with EC public key, and rejected with RSA public key
+        ec_auth = FirebaseAuthManager(
+            project_id="test-project",
+            verification_key=ec_pub_pem,
+            allowed_algorithms=["ES256"],
+        )
+        es256_token = jwt.encode(claims, ec_priv_pem, algorithm="ES256")
+        ec_user = ec_auth.verify_bearer_token(f"Bearer {es256_token}")
+        self.assertIsNotNone(ec_user)
+        self.assertTrue(ec_user.is_cryptographically_verified())
+
+        # EC token presented to RSA verifier is rejected
+        self.assertIsNone(rsa_auth.verify_bearer_token(f"Bearer {es256_token}"))
+
+    def test_unexpected_claim_types_and_future_iat_rejected(self):
+        """Phase 4.1 §4: Malformed claim types (bool exp/nbf, int sub, future iat) must be rejected."""
+        base_claims = {
+            "sub": "valid-user",
+            "iss": "https://securetoken.google.com/test-project",
+            "aud": "test-project",
+            "exp": _now() + 3600,
+        }
+        bad_overrides = [
+            {"exp": True},
+            {"nbf": True},
+            {"iat": True},
+            {"iat": _now() + 3600},  # Future-dated iat beyond clock skew
+            {"sub": 12345},
+            {"sub": "   "},
+            {"email": ["not-a-string@lab.org"]},
+            {"jti": ""},
+            {"tenant_id": "../traversal"},
+        ]
+        for override in bad_overrides:
+            claims = dict(base_claims)
+            claims.update(override)
+            tok = _make_jwt({"alg": "HS256", "typ": "JWT"}, claims, signature=b"x")
+            # Even with valid signature, claim validation must reject
+            import hmac as _hmac
+            parts = tok.split(".")
+            sig = _b64url(_hmac.new(self.secret.encode("utf-8"), f"{parts[0]}.{parts[1]}".encode("ascii"), hashlib.sha256).digest())
+            signed_bad_tok = f"{parts[0]}.{parts[1]}.{sig}"
+            self.assertIsNone(
+                self.auth.verify_bearer_token(f"Bearer {signed_bad_tok}"),
+                f"Malformed claims {override} must be rejected",
+            )
+
+    def test_server_side_tenant_membership_policy_enforced(self):
+        """Phase 4.1 §4: Server-side tenant_membership_policy prevents arbitrary tenant claim substitution."""
+        auth = FirebaseAuthManager(
+            project_id="test-project",
+            verification_key=self.secret,
+            allowed_algorithms=["HS256"],
+            tenant_membership_policy={
+                "alice-uid": {"tenant_alpha"},
+                "bob-uid": {"tenant_beta"},
+            },
+        )
+        # Alice claiming tenant_alpha succeeds
+        tok_ok = jwt.encode(
+            {
+                "sub": "alice-uid",
+                "tenant_id": "tenant_alpha",
+                "iss": "https://securetoken.google.com/test-project",
+                "aud": "test-project",
+                "exp": _now() + 3600,
+            },
+            self.secret,
+            algorithm="HS256",
+        )
+        self.assertIsNotNone(auth.verify_bearer_token(f"Bearer {tok_ok}"))
+
+        # Alice claiming tenant_beta is rejected by server-side membership policy
+        tok_cross = jwt.encode(
+            {
+                "sub": "alice-uid",
+                "tenant_id": "tenant_beta",
+                "iss": "https://securetoken.google.com/test-project",
+                "aud": "test-project",
+                "exp": _now() + 3600,
+            },
+            self.secret,
+            algorithm="HS256",
+        )
+        self.assertIsNone(auth.verify_bearer_token(f"Bearer {tok_cross}"))
+
+    def test_shared_sqlite_revocation_store_persists_across_restarts(self):
+        """Phase 4.1 §4: SharedRevocationStore persists token/user revocations across manager instances."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "revocations.sqlite3")
+            store1 = SharedRevocationStore(db_path=db_path)
+            auth1 = FirebaseAuthManager(
+                project_id="test-project",
+                verification_key=self.secret,
+                allowed_algorithms=["HS256"],
+                revocation_store=store1,
+            )
+            self.assertEqual(auth1.revocation_persistence_mode, "shared_sqlite")
+            tok = jwt.encode(
+                {
+                    "sub": "user-persist-1",
+                    "jti": "jti-persist-1",
+                    "iss": "https://securetoken.google.com/test-project",
+                    "aud": "test-project",
+                    "exp": _now() + 3600,
+                },
+                self.secret,
+                algorithm="HS256",
+            )
+            self.assertIsNotNone(auth1.verify_bearer_token(f"Bearer {tok}"))
+            auth1.revoke_token("jti-persist-1")
+
+            # Simulate restart with a fresh FirebaseAuthManager and SharedRevocationStore pointing to same DB
+            store2 = SharedRevocationStore(db_path=db_path)
+            auth2 = FirebaseAuthManager(
+                project_id="test-project",
+                verification_key=self.secret,
+                allowed_algorithms=["HS256"],
+                revocation_store=store2,
+            )
+            self.assertIsNone(
+                auth2.verify_bearer_token(f"Bearer {tok}"),
+                "Revoked JTI must remain rejected after manager restart",
+            )
 
     def test_revocation_denylist_blocks_subsequent_calls(self):
         """Revoked token jti must be blocked on every subsequent verification attempt."""
-        from reverse_forge.firebase_sync import FirebaseAuthManager
-        auth = FirebaseAuthManager(allow_dev_mock=True, verification_key="key")
+        auth = FirebaseAuthManager(allow_dev_mock=True, verification_key=self.secret, allowed_algorithms=["HS256"])
         auth.revoke_token("jti-compromised-abc")
         self.assertIn("jti-compromised-abc", auth.revoked_tokens)
         auth.revoke_user("uid-terminated")
@@ -558,11 +761,10 @@ class TestPhase4AuthHardening(unittest.TestCase):
 
 
 class TestProductionPersistenceAdapterContracts(unittest.TestCase):
-    """Phase 4 §5: Persistence adapter contract tests with explicit backend labeling."""
+    """Phase 4 §5 & Phase 4.1 §7: Persistence adapter contract & boundary tests."""
 
     def test_production_adapter_raises_without_credentials(self):
         """ProductionFirestoreStorageAdapter must raise RuntimeError if key is absent."""
-        from reverse_forge.firebase_sync import ProductionFirestoreStorageAdapter
         with patch.dict(os.environ, {"FIREBASE_SERVICE_ACCOUNT_KEY": ""}):
             with self.assertRaises(RuntimeError) as ctx:
                 ProductionFirestoreStorageAdapter(
@@ -573,19 +775,14 @@ class TestProductionPersistenceAdapterContracts(unittest.TestCase):
 
     def test_simulation_adapter_never_returns_gs_uri(self):
         """LocalSimulationPersistenceAdapter must never produce gs:// URIs."""
-        from reverse_forge.firebase_sync import LocalSimulationPersistenceAdapter
         adapter = LocalSimulationPersistenceAdapter()
         for i in range(5):
             uri = adapter.store_blob(f"path/file_{i}.bin", b"DATA", tenant_id=f"tenant_{i}")
-            self.assertFalse(uri.startswith("gs://"),
-                             f"Simulation URI must not use gs://: {uri}")
-            self.assertTrue(uri.startswith("local-sim://"),
-                            f"Simulation URI must use local-sim://: {uri}")
+            self.assertFalse(uri.startswith("gs://"), f"Simulation URI must not use gs://: {uri}")
+            self.assertTrue(uri.startswith("local-sim://"), f"Simulation URI must use local-sim://: {uri}")
 
     def test_simulation_adapter_tenant_isolation_jobs(self):
         """Jobs stored under tenant_a must not appear under tenant_b."""
-        from reverse_forge.firebase_sync import LocalSimulationPersistenceAdapter, FirestoreJobDocument
-        from datetime import datetime, timezone
         adapter = LocalSimulationPersistenceAdapter()
         now = datetime.now(timezone.utc).isoformat()
         job = FirestoreJobDocument(
@@ -601,15 +798,11 @@ class TestProductionPersistenceAdapterContracts(unittest.TestCase):
             updated_at=now,
         )
         adapter.save_job(job)
-        # Tenant alice can read it
         self.assertIsNotNone(adapter.get_job("job-001", tenant_id="tenant-alice"))
-        # Tenant bob cannot
         self.assertIsNone(adapter.get_job("job-001", tenant_id="tenant-bob"))
 
     def test_simulation_adapter_update_job_tenant_isolation(self):
         """Job updates must be scoped to the correct tenant."""
-        from reverse_forge.firebase_sync import LocalSimulationPersistenceAdapter, FirestoreJobDocument
-        from datetime import datetime, timezone
         adapter = LocalSimulationPersistenceAdapter()
         now = datetime.now(timezone.utc).isoformat()
         job = FirestoreJobDocument(
@@ -625,23 +818,79 @@ class TestProductionPersistenceAdapterContracts(unittest.TestCase):
             updated_at=now,
         )
         adapter.save_job(job)
-        # Update within correct tenant succeeds
         ok = adapter.update_job("job-002", "tenant-correct", {"status": "COMPLETED"})
         self.assertTrue(ok)
-        # Update with wrong tenant fails (job not found under that tenant)
         ok_wrong = adapter.update_job("job-002", "tenant-wrong", {"status": "HACKED"})
         self.assertFalse(ok_wrong)
 
     def test_firebase_sync_manager_cannot_silently_fall_back(self):
         """FirebaseSyncManager in production mode must raise, not silently use simulation."""
-        from reverse_forge.firebase_sync import FirebaseSyncManager
         with patch.dict(os.environ, {
             "REVERSE_FORGE_ENV": "production",
             "FIREBASE_SERVICE_ACCOUNT_KEY": "/nonexistent/path/service-account.json",
         }):
             with self.assertRaises(RuntimeError):
-                # Should raise because key file does not exist
-                FirebaseSyncManager()  # force_local_sim=False (default in production)
+                FirebaseSyncManager()
+
+    def test_phase41_identifier_and_blob_path_validation_blocks_traversal_and_schemes(self):
+        """Phase 4.1 §7: Validate artifact IDs, tenant IDs, job IDs, and storage paths against traversal and schemes."""
+        for bad_tenant in ["", "../etc", "tenant/a", "gs://bucket", "tenant..1", "a\x00b"]:
+            with self.assertRaises(ValueError):
+                validate_tenant_id(bad_tenant)
+
+        for bad_sha in ["", "not_a_sha", "a" * 32, "g" * 64, "../" + "a" * 61]:
+            with self.assertRaises(ValueError):
+                validate_artifact_sha256(bad_sha)
+
+        for bad_doc in ["", ".", "..", "doc/sub", "doc\\sub", "id..2"]:
+            with self.assertRaises(ValueError):
+                validate_document_id(bad_doc, "job_id")
+
+        for bad_blob in ["", "/etc/passwd", "../secret.bin", "binaries/../../etc/shadow", "gs://bucket/obj", "http://evil/x"]:
+            with self.assertRaises(ValueError):
+                validate_storage_blob_path(bad_blob)
+
+    def test_phase41_production_adapter_distinguishes_not_found_permission_and_outage(self):
+        """Phase 4.1 §7: ProductionFirestoreStorageAdapter distinguishes NotFound (None), PermissionError, and Unavailable."""
+        mock_fs = MagicMock()
+        mock_st = MagicMock()
+        adapter = ProductionFirestoreStorageAdapter(
+            project_id="p41-proj",
+            storage_bucket="p41-bucket",
+            firestore_client=mock_fs,
+            storage_client=mock_st,
+        )
+        sha = "e" * 64
+
+        # 1. Missing document -> returns None cleanly
+        snap_missing = MagicMock()
+        snap_missing.exists = False
+        mock_fs.collection().document().collection().document().get.return_value = snap_missing
+        self.assertIsNone(adapter.get_artifact(sha, "tenant_a"))
+
+        # 2. Cross-tenant document payload mismatch -> raises PersistencePermissionError
+        snap_mismatch = MagicMock()
+        snap_mismatch.exists = True
+        snap_mismatch.to_dict.return_value = {"sha256": sha, "tenant_id": "tenant_other"}
+        mock_fs.collection().document().collection().document().get.return_value = snap_mismatch
+        with self.assertRaises(PersistencePermissionError):
+            adapter.get_artifact(sha, "tenant_a")
+
+        # 3. Backend PermissionDenied exception -> raises PersistencePermissionError (not None!)
+        class PermissionDenied(Exception):
+            code = 403
+
+        mock_fs.collection().document().collection().document().get.side_effect = PermissionDenied("IAM denied")
+        with self.assertRaises(PersistencePermissionError):
+            adapter.get_artifact(sha, "tenant_a")
+
+        # 4. Backend ServiceUnavailable / network outage -> raises PersistenceUnavailableError (not None!)
+        class ServiceUnavailable(Exception):
+            code = 503
+
+        mock_fs.collection().document().collection().document().get.side_effect = ServiceUnavailable("RPC timeout")
+        with self.assertRaises(PersistenceUnavailableError):
+            adapter.get_artifact(sha, "tenant_a")
 
 
 class TestNativeBridgePhase4(unittest.TestCase):
@@ -659,27 +908,22 @@ class TestNativeBridgePhase4(unittest.TestCase):
     def test_fingerprint_changes_if_source_changes(self):
         """Source fingerprint must differ when source content changes."""
         from reverse_forge.native_rust_bridge import NativeRustAccelerator
-        import shutil
 
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         fp_before = NativeRustAccelerator.compute_source_fingerprint(repo_root)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a fake repo root with a modified source file
             fake_rust_dir = os.path.join(tmpdir, "rust_core", "src")
             os.makedirs(fake_rust_dir)
-            # Write different content than actual source
             with open(os.path.join(fake_rust_dir, "lib.rs"), "w") as f:
                 f.write("// Modified source content for test")
 
             fp_modified = NativeRustAccelerator.compute_source_fingerprint(tmpdir)
-            self.assertNotEqual(fp_before, fp_modified,
-                                "Fingerprint must change when source changes")
+            self.assertNotEqual(fp_before, fp_modified, "Fingerprint must change when source changes")
 
     def test_validate_abi_rejects_missing_symbols(self):
         """Library missing required symbols must fail ABI validation."""
         from reverse_forge.native_rust_bridge import NativeRustAccelerator
-        # Mock with only some symbols
         partial_lib = MagicMock(spec=["rf_rust_entropy", "rf_rust_flirt_crc16"])
         self.assertFalse(NativeRustAccelerator._validate_abi(partial_lib))
 
@@ -687,15 +931,15 @@ class TestNativeBridgePhase4(unittest.TestCase):
         """ABI validation must reject library returning wrong CRC16 for '123456789'."""
         from reverse_forge.native_rust_bridge import NativeRustAccelerator
         lib = MagicMock()
-        lib.rf_rust_flirt_crc16.return_value = 0xDEAD  # Wrong!
+        lib.rf_rust_flirt_crc16.return_value = 0xDEAD
         self.assertFalse(NativeRustAccelerator._validate_abi(lib))
 
     def test_validate_abi_rejects_wrong_entropy_vector(self):
         """ABI validation must reject library returning nonzero entropy for empty buffer."""
         from reverse_forge.native_rust_bridge import NativeRustAccelerator
         lib = MagicMock()
-        lib.rf_rust_flirt_crc16.return_value = 0x906E  # Correct CRC
-        lib.rf_rust_entropy.return_value = 1.5         # Wrong! Should be 0.0
+        lib.rf_rust_flirt_crc16.return_value = 0x906E
+        lib.rf_rust_entropy.return_value = 1.5
         self.assertFalse(NativeRustAccelerator._validate_abi(lib))
 
     def test_validate_abi_rejects_wrong_fnv1a64_vector(self):
@@ -704,7 +948,7 @@ class TestNativeBridgePhase4(unittest.TestCase):
         lib = MagicMock()
         lib.rf_rust_flirt_crc16.return_value = 0x906E
         lib.rf_rust_entropy.return_value = 0.0
-        lib.rf_rust_fnv1a_64.return_value = 0xBADBAD  # Wrong!
+        lib.rf_rust_fnv1a_64.return_value = 0xBADBAD
         self.assertFalse(NativeRustAccelerator._validate_abi(lib))
 
     def test_validate_abi_accepts_correct_vectors(self):
@@ -719,18 +963,15 @@ class TestNativeBridgePhase4(unittest.TestCase):
     def test_build_diagnostics_are_captured_on_failure(self):
         """Build diagnostics must be accessible and not suppressed on failure."""
         from reverse_forge.native_rust_bridge import NativeRustAccelerator
-        # Diagnostics list is accessible
         diags = NativeRustAccelerator.get_build_diagnostics()
-        self.assertIsInstance(diags, list,
-                              "get_build_diagnostics() must return a list")
+        self.assertIsInstance(diags, list, "get_build_diagnostics() must return a list")
 
     def test_backend_always_returns_known_value(self):
         """Active backend must always be one of the three explicit modes."""
         from reverse_forge.native_rust_bridge import NativeRustAccelerator, BackendExecutionMode
         backend = NativeRustAccelerator.get_active_backend()
         valid_backends = set(BackendExecutionMode)
-        self.assertIn(backend, valid_backends,
-                      f"Backend {backend} is not a known BackendExecutionMode")
+        self.assertIn(backend, valid_backends, f"Backend {backend} is not a known BackendExecutionMode")
 
 
 if __name__ == "__main__":

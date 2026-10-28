@@ -3855,18 +3855,28 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         pass
 
+    strict_auth: bool = False
+    hil_callback: Any = None
+    scope_ledger: Any = None
+
     def _get_auth_user(self) -> Optional[AuthUserContext]:
         auth_hdr = self.headers.get("Authorization")
-        user = firebase_sync.auth.verify_bearer_token(auth_hdr)
-        if user is None and not firebase_sync.auth.is_production:
-            return AuthUserContext(
-                uid="dev_local_workbench",
-                email="dev@reverse-forge.local",
-                role=UserRole.LEAD_ARCHITECT,
-                tenant_id="local_lab",
-                is_verified=True,
-            )
-        return user
+        return firebase_sync.auth.verify_bearer_token(auth_hdr)
+
+    def _extract_approval_grant(self, payload: Optional[Dict[str, Any]] = None) -> Any:
+        from reverse_forge.authorization import ApprovalGrant
+        hdr_grant = self.headers.get("X-HIL-Approval-Grant")
+        if hdr_grant:
+            try:
+                return ApprovalGrant.from_dict(json.loads(hdr_grant))
+            except Exception:
+                return None
+        if isinstance(payload, dict) and isinstance(payload.get("approval_grant"), dict):
+            try:
+                return ApprovalGrant.from_dict(payload["approval_grant"])
+            except Exception:
+                return None
+        return None
 
     def _validate_safe_path(self, path_str: Optional[str]) -> Tuple[bool, str]:
         ok, res = PathSecurityValidator.validate_safe_path(path_str or self.default_binary_path)
@@ -3902,6 +3912,14 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
         raw_body = self.rfile.read(content_len)
 
         if path == "/api/upload":
+            if self.strict_auth or firebase_sync.auth.is_production or self.headers.get("Authorization"):
+                user = self._get_auth_user()
+                if not user or not user.is_cryptographically_verified():
+                    self._json_response({"status": "error", "error": "Authentication required for upload"}, status=401)
+                    return
+                if not user.can_modify():
+                    self._json_response({"status": "error", "error": "Insufficient RBAC role for upload"}, status=403)
+                    return
             raw_fname = query.get("filename", ["uploaded.bin"])[0]
             safe_fname = "".join(c if (c.isalnum() or c in "._-") else "_" for c in os.path.basename(raw_fname)) or "uploaded.bin"
             upload_dir = os.path.join(tempfile.gettempdir(), "reverse_forge_uploads")
@@ -3918,6 +3936,14 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/annotate":
+            if self.strict_auth or firebase_sync.auth.is_production or self.headers.get("Authorization"):
+                user = self._get_auth_user()
+                if not user or not user.is_cryptographically_verified():
+                    self._json_response({"status": "error", "error": "Authentication required for annotation"}, status=401)
+                    return
+                if not user.can_modify():
+                    self._json_response({"status": "error", "error": "Insufficient RBAC role for annotation"}, status=403)
+                    return
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
                 act = payload.get("action", "")
@@ -3937,15 +3963,19 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/patch":
             user = self._get_auth_user()
-            if not user or not user.can_modify():
-                self._json_response({"status": "error", "error": "Insufficient RBAC permissions: user cannot modify artifacts"}, status=403 if user else 401)
+            if not user or not user.is_cryptographically_verified():
+                self._json_response({"status": "error", "error": "Authentication required: verified Bearer token missing"}, status=401)
+                return
+            if not user.can_modify():
+                self._json_response({"status": "error", "error": "Insufficient RBAC permissions: user cannot modify artifacts"}, status=403)
                 return
             ok, bin_path = self._extract_and_validate_path(query)
             if not ok:
                 self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
-            from reverse_forge.provenance import ScopeLedger, ActionPermission
-            scope = ScopeLedger(
+            from reverse_forge.provenance import ScopeLedger, ActionPermission, ProvenanceManager
+            from reverse_forge.authorization import get_authorization_boundary, OperationType
+            scope = self.scope_ledger or ScopeLedger(
                 allowed_paths=[os.path.realpath(bin_path)],
                 default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS, ActionPermission.MODIFY_ARTIFACT],
             )
@@ -3958,6 +3988,23 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 off_s = str(payload.get("offset", "0x0"))
                 file_off = int(off_s, 16) if off_s.lower().startswith("0x") else int(off_s, 10)
                 op = str(payload.get("operation", "nop")).lower()
+                target_sha256 = ProvenanceManager.compute_hashes(bin_path)["sha256"]
+                grant = self._extract_approval_grant(payload)
+                boundary = get_authorization_boundary()
+                permitted, dec, reason, _ = boundary.evaluate_request(
+                    principal=user,
+                    operation=OperationType.MODIFY_ARTIFACT,
+                    target_path=bin_path,
+                    target_sha256=target_sha256,
+                    target_tenant_id=user.tenant_id,
+                    parameters={"offset": off_s, "operation": op},
+                    scope_ledger=scope,
+                    approval_grant=grant,
+                    hil_callback=self.hil_callback,
+                )
+                if not permitted:
+                    self._json_response({"status": "error", "decision": dec.value, "error": reason}, status=403)
+                    return
                 with open(bin_path, "rb") as f:
                     orig_data = f.read(self.MAX_UPLOAD_BYTES)
                 patcher = BinaryPatcherEngine(orig_data)
@@ -4031,13 +4078,28 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 return
 
         elif path == "/api/investigate/approve":
+            user = self._get_auth_user()
+            if not user or not user.is_cryptographically_verified():
+                self._json_response({"status": "error", "error": "Authentication required for HIL approval"}, status=401)
+                return
+            if not user.can_modify():
+                self._json_response({"status": "error", "error": "Insufficient RBAC role for HIL approval"}, status=403)
+                return
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
                 inv_id = payload.get("id", "").strip()
                 action = payload.get("action", "dynamic_execution")
                 decision = payload.get("decision", "APPROVE_SANDBOXED")
-                operator = payload.get("operator", "analyst")
-                state = investigation_engine.submit_hil_decision(inv_id, action, decision, operator=operator)
+                grant = self._extract_approval_grant(payload)
+                state = investigation_engine.submit_hil_decision(
+                    inv_id,
+                    action,
+                    decision,
+                    operator=user.uid,
+                    principal=user,
+                    approval_grant=grant,
+                    strict_auth=True,
+                )
 
                 def _resume_inv(i_id: str) -> Dict[str, Any]:
                     resumed = investigation_engine.run_to_completion_or_hil(i_id)
@@ -4095,9 +4157,12 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/cloud/sync":
             user = self._get_auth_user()
-            if not user or user.role not in (UserRole.ANALYST, UserRole.LEAD_ARCHITECT):
-                err = f"Insufficient RBAC permissions: {user.role.value if user else 'anonymous'}"
-                self._json_response({"status": "error", "error": err}, status=403 if user else 401)
+            if not user or not user.is_cryptographically_verified():
+                self._json_response({"status": "error", "error": "Authentication required for cloud sync"}, status=401)
+                return
+            if not user.can_modify():
+                err = f"Insufficient RBAC permissions: {user.role.value}"
+                self._json_response({"status": "error", "error": err}, status=403)
                 return
             ok, bin_path = self._extract_and_validate_path(query)
             if not ok:
@@ -4169,6 +4234,9 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/native-rust":
             cmd = query.get("cmd", ["doctor"])[0]
+            if cmd not in ("doctor", "omni-audit", "version", "help"):
+                self._json_response({"status": "error", "error": f"Disallowed native command: {cmd!r}"}, status=400)
+                return
             root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             bin_exec = os.path.join(root, "rust_core", "bin", "reverse-forge-native")
             if not os.path.isfile(bin_exec):
@@ -4218,20 +4286,41 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/force-exec":
             user = self._get_auth_user()
-            if not user or user.role not in (UserRole.ANALYST, UserRole.LEAD_ARCHITECT):
-                self._json_response({"status": "error", "error": "Insufficient RBAC permissions for execution"}, status=403 if user else 401)
+            if not user or not user.is_cryptographically_verified():
+                self._json_response({"status": "error", "error": "Authentication required for force-exec"}, status=401)
+                return
+            if not user.can_modify():
+                self._json_response({"status": "error", "error": "Insufficient RBAC permissions for execution"}, status=403)
                 return
             ok, bin_path = self._extract_and_validate_path(query)
             if not ok:
                 self._json_response({"status": "error", "error": bin_path}, status=400)
                 return
-            from reverse_forge.provenance import ScopeLedger, ActionPermission
-            scope = ScopeLedger(
+            from reverse_forge.provenance import ScopeLedger, ActionPermission, ProvenanceManager
+            from reverse_forge.authorization import get_authorization_boundary, OperationType
+            scope = self.scope_ledger or ScopeLedger(
                 allowed_paths=[os.path.realpath(bin_path)],
                 default_actions=[ActionPermission.READ_HASH, ActionPermission.STATIC_ANALYSIS, ActionPermission.DYNAMIC_SANDBOX],
             )
             if not scope.is_authorized(bin_path, ActionPermission.DYNAMIC_SANDBOX):
                 self._json_response({"status": "error", "error": f"Permission denied: action 'dynamic_sandbox' not authorized on {bin_path}"}, status=403)
+                return
+            target_sha256 = ProvenanceManager.compute_hashes(bin_path)["sha256"]
+            grant = self._extract_approval_grant()
+            boundary = get_authorization_boundary()
+            permitted, dec, reason, _ = boundary.evaluate_request(
+                principal=user,
+                operation=OperationType.DYNAMIC_SANDBOX,
+                target_path=bin_path,
+                target_sha256=target_sha256,
+                target_tenant_id=user.tenant_id,
+                parameters={"path": os.path.realpath(bin_path)},
+                scope_ledger=scope,
+                approval_grant=grant,
+                hil_callback=self.hil_callback,
+            )
+            if not permitted:
+                self._json_response({"status": "error", "decision": dec.value, "error": reason}, status=403)
                 return
             from reverse_forge.underconstrained_visor_engine import UnderConstrainedMicroVisor
             with open(bin_path, "rb") as f:

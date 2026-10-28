@@ -1015,6 +1015,8 @@ def main():
                 "radare2": tools["radare2"]["available"],
                 "ghidra_headless": tools["ghidra"]["available"],
                 "ida_headless": IDAHeadlessAnalyzer().is_available(),
+                "rizin": tools.get("rizin", {}).get("available", False),
+                "cutter": tools.get("cutter", {}).get("available", False),
                 "objdump": tools["system_disassemblers"]["objdump"],
                 "gdb": tools["system_disassemblers"]["gdb"],
                 "strace": shutil.which("strace") is not None,

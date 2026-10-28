@@ -3,12 +3,14 @@ R3V3R53//F0RG3 — Part IV & V: Adaptive Investigation Workflow & Evidence Engin
 (`investigation_workflow.py`)
 
 Executes intent-driven investigations through an iterative, hypothesis-testing,
-evidence-grounded 9-stage lifecycle with Human-In-The-Loop (HIL) safety boundaries.
+evidence-grounded 9-stage lifecycle with Human-In-The-Loop (HIL) safety boundaries
+and CentralAuthorizationBoundary enforcement.
 """
 
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 import logging
 import os
@@ -19,6 +21,14 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from reverse_forge.authorization import (
+    ApprovalGrant,
+    AuthorizationDecision,
+    AuthorizationDeniedError,
+    CentralAuthorizationBoundary,
+    OperationType,
+    get_authorization_boundary,
+)
 from reverse_forge.capability_registry import CapabilityRegistry, capability_registry
 from reverse_forge.intent_engine import InvestigationObjectiveType, InvestigationSpecification, intent_compiler
 from reverse_forge.binary_intel_engine import BinaryIntelEngine
@@ -26,6 +36,7 @@ from reverse_forge.correlation_engine import CorrelationEngine
 from reverse_forge.whole_binary_function_indexer import WholeBinaryFunctionIndexer
 from reverse_forge.yara_sigma_ioc_generator import YaraSigmaIOCGenerator
 from reverse_forge.firebase_sync import firebase_sync, AuthUserContext, UserRole
+from reverse_forge.provenance import ActionPermission, ProvenanceManager, ScopeLedger
 
 logger = logging.getLogger("reverse_forge.investigation_workflow")
 
@@ -91,6 +102,8 @@ class InvestigationState:
     current_stage_idx: int = 1
     current_stage_name: str = "Stage 1: Intake & Format Identification"
     status: str = "INITIALIZED"                 # INITIALIZED, RUNNING, BLOCKED_HIL, COMPLETED, FAILED
+    tenant_id: str = "default_tenant"
+    target_sha256: str = ""
     hypotheses: Dict[str, Hypothesis] = field(default_factory=dict)
     evidence: Dict[str, EvidenceItem] = field(default_factory=dict)
     findings: List[Dict[str, Any]] = field(default_factory=list)
@@ -109,6 +122,8 @@ class InvestigationState:
             "current_stage_idx": self.current_stage_idx,
             "current_stage_name": self.current_stage_name,
             "status": self.status,
+            "tenant_id": self.tenant_id,
+            "target_sha256": self.target_sha256,
             "hypotheses": {k: h.to_dict() for k, h in self.hypotheses.items()},
             "evidence": {k: e.to_dict() for k, e in self.evidence.items()},
             "findings": self.findings,
@@ -140,8 +155,13 @@ class InvestigationWorkflowEngine:
         "Stage 9: Deliverable Synthesis",
     ]
 
-    def __init__(self, registry: Optional[CapabilityRegistry] = None) -> None:
+    def __init__(
+        self,
+        registry: Optional[CapabilityRegistry] = None,
+        authorization_boundary: Optional[CentralAuthorizationBoundary] = None,
+    ) -> None:
         self.registry = registry or capability_registry
+        self.authorization_boundary = authorization_boundary or get_authorization_boundary()
         self._investigations: Dict[str, InvestigationState] = {}
 
     def create_investigation(
@@ -150,11 +170,20 @@ class InvestigationWorkflowEngine:
         target_artifact: str,
         format_hint: Optional[str] = None,
         arch_hint: Optional[str] = None,
+        tenant_id: str = "default_tenant",
     ) -> InvestigationState:
         """Compile intent and initialize a new persistent investigation."""
         spec = intent_compiler.compile(intent_text, target_artifact, format_hint, arch_hint)
         inv_id = f"inv_{uuid.uuid4().hex[:12]}"
-        state = InvestigationState(investigation_id=inv_id, spec=spec)
+        sha = ""
+        if os.path.isfile(spec.target_artifact_path):
+            sha = ProvenanceManager.compute_hashes(spec.target_artifact_path)["sha256"]
+        state = InvestigationState(
+            investigation_id=inv_id,
+            spec=spec,
+            tenant_id=tenant_id,
+            target_sha256=sha,
+        )
         self._investigations[inv_id] = state
         return state
 
@@ -197,7 +226,7 @@ class InvestigationWorkflowEngine:
                 if state.spec.requires_dynamic_execution:
                     state.current_stage_idx = 5
                 else:
-                    state.current_stage_idx = 7 # Skip dynamic planning, proceed to static deeper investigation
+                    state.current_stage_idx = 7
 
             # Stage 5: Dynamic Planning
             elif stage_idx == 5:
@@ -208,7 +237,7 @@ class InvestigationWorkflowEngine:
                         "action": "dynamic_execution",
                         "title": "Authorize Sandboxed Dynamic Execution",
                         "description": (
-                            f"The investigation requires dynamic execution under {state.spec.target_artifact_path} "
+                            f"The investigation requires dynamic emulation/execution under {state.spec.target_artifact_path} "
                             "to collect runtime register and memory traces. Confirm sandboxed execution?"
                         ),
                         "options": ["APPROVE_SANDBOXED", "REJECT_STATIC_ONLY"],
@@ -260,16 +289,59 @@ class InvestigationWorkflowEngine:
                 break
         return state
 
-    def submit_hil_decision(self, inv_id: str, action: str, decision: str, operator: str = "analyst") -> InvestigationState:
-        """Process operator HIL decision to resume execution."""
+    def submit_hil_decision(
+        self,
+        inv_id: str,
+        action: str,
+        decision: str,
+        operator: str = "analyst",
+        principal: Optional[AuthUserContext] = None,
+        approval_grant: Optional[ApprovalGrant] = None,
+        strict_auth: bool = False,
+        boundary: Optional[CentralAuthorizationBoundary] = None,
+    ) -> InvestigationState:
+        """
+        Process operator HIL decision to resume execution.
+        When `strict_auth=True`, `REVERSE_FORGE_ENV=production`, or `principal`/`approval_grant`
+        is supplied for `APPROVE_SANDBOXED`, enforces `CentralAuthorizationBoundary` verification.
+        """
         state = self.get_investigation(inv_id)
         if not state or state.status != "BLOCKED_HIL":
             raise ValueError(f"Investigation is not waiting for HIL approval: {inv_id}")
 
+        is_prod = os.environ.get("REVERSE_FORGE_ENV", "").strip().lower() == "production"
+        enforce_boundary = bool(strict_auth or is_prod or principal is not None or approval_grant is not None)
+
+        if decision == "APPROVE_SANDBOXED" and enforce_boundary:
+            auth_boundary = boundary or self.authorization_boundary
+            target_path = state.spec.target_artifact_path
+            target_sha = state.target_sha256 or (
+                ProvenanceManager.compute_hashes(target_path)["sha256"] if os.path.isfile(target_path) else ""
+            )
+            permitted, dec, reason, consumed_grant = auth_boundary.evaluate_request(
+                principal=principal,
+                operation=OperationType.DYNAMIC_SANDBOX,
+                target_path=target_path,
+                target_sha256=target_sha,
+                target_tenant_id=state.tenant_id,
+                parameters={"investigation_id": inv_id, "action": action},
+                approval_grant=approval_grant,
+            )
+            if not permitted:
+                raise AuthorizationDeniedError(dec, reason, {})
+            operator_id = principal.uid if principal else operator
+            grant_id = consumed_grant.grant_id if consumed_grant else None
+        else:
+            if decision not in ("APPROVE_SANDBOXED", "REJECT_STATIC_ONLY"):
+                raise ValueError(f"Invalid HIL decision '{decision}': must be APPROVE_SANDBOXED or REJECT_STATIC_ONLY")
+            operator_id = principal.uid if principal else operator
+            grant_id = None
+
         rec = {
             "action": action,
             "decision": decision,
-            "operator": operator,
+            "operator": operator_id,
+            "grant_id": grant_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         state.hil_history.append(rec)
@@ -277,12 +349,10 @@ class InvestigationWorkflowEngine:
 
         if decision == "APPROVE_SANDBOXED":
             state.status = "RUNNING"
-            state.current_stage_idx = 6 # Proceed to dynamic execution
+            state.current_stage_idx = 6
         elif decision == "REJECT_STATIC_ONLY":
             state.status = "RUNNING"
-            state.current_stage_idx = 7 # Pivot to static slicing
-        else:
-            state.status = "RUNNING"
+            state.current_stage_idx = 7
 
         return state
 
@@ -292,6 +362,9 @@ class InvestigationWorkflowEngine:
         target = state.spec.target_artifact_path
         if not os.path.exists(target):
             raise FileNotFoundError(f"Target binary artifact does not exist: {target}")
+
+        hashes = ProvenanceManager.compute_hashes(target)
+        state.target_sha256 = hashes["sha256"]
 
         with open(target, "rb") as f:
             raw_bytes = f.read(1048576)
@@ -413,7 +486,16 @@ class InvestigationWorkflowEngine:
         )
 
     def _run_stage6_dynamic_execution(self, state: InvestigationState) -> None:
+        # Guard direct invocation of Stage 6: require explicit HIL approval when spec requires it
+        if state.spec.requires_hil_approval and not self._is_hil_approved(state, "dynamic_execution"):
+            raise AuthorizationDeniedError(AuthorizationDecision.DENIED_HIL_APPROVAL_REQUIRED, "Stage 6 dynamic execution denied: missing required HIL approval", {})
+
         target = state.spec.target_artifact_path
+        if state.target_sha256 and os.path.isfile(target):
+            current_sha = ProvenanceManager.compute_hashes(target)["sha256"]
+            if current_sha != state.target_sha256:
+                raise AuthorizationDeniedError(AuthorizationDecision.DENIED_HIL_TARGET_MISMATCH, "TOCTOU target hash mismatch before Stage 6 execution", {})
+
         with open(target, "rb") as f:
             data = f.read(1048576)
 
@@ -431,7 +513,7 @@ class InvestigationWorkflowEngine:
             stage_name="Stage 6: Sandboxed Execution",
             source_tool_id="underconstrained_visor",
             address_va=_safe_va_str(entry_va or 0x401000),
-            observation_summary=f"Micro-Visor executed {steps} steps across {v_rep.total_paths_explored} paths without faulting",
+            observation_summary=f"[In-Memory Emulation] Micro-Visor emulated {steps} steps across {v_rep.total_paths_explored} paths without host execution",
             raw_snippet=f"Final RAX: {rax_val}, Halt: {halt_reason}",
             confidence=0.9,
         )
@@ -492,16 +574,18 @@ class InvestigationWorkflowEngine:
                     "severity": v.get("severity", "MEDIUM"),
                     "cvss_score": v.get("cvss_score", 5.0),
                     "location_va": v.get("location_va", "0x401000"),
-                    "verified": True,
+                    "confidence": "Heuristic",
+                    "verified": False,
                 })
         else:
             state.findings.append({
                 "finding_id": "RF-FIND-001",
                 "cwe_id": "CWE-CLEAN",
-                "title": f"Investigation Objective Verified for {state.spec.objective_type.value}",
+                "title": f"Investigation Objective Evaluated for {state.spec.objective_type.value}",
                 "severity": "INFO",
                 "cvss_score": 0.0,
                 "location_va": "0x401000",
+                "confidence": "StaticBaseline",
                 "verified": True,
             })
 

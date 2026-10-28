@@ -185,11 +185,48 @@ class TestPhase69To70LiveWebPatchingPersistentDebuggerAndEternalCLI(unittest.Tes
             self.assertEqual(v_doc["status"], "ok")
             self.assertGreaterEqual(v_doc["vulnerabilities_count"], 1)
 
-            # 2. POST /api/patch inverts conditional jump (0x74 je -> 0x75 jne at offset 68)
+            # 2. POST /api/patch requires verified Bearer JWT and single-use HIL ApprovalGrant
+            from reverse_forge.gui_server import firebase_sync
+            from reverse_forge.firebase_sync import jwt
+            from reverse_forge.authorization import ApprovalIssuer, HILKeyRing, OperationType, reset_authorization_boundary
+            from reverse_forge.provenance import ProvenanceManager
+            import time as _time
+            jwt_secret = "phase69_jwt_secret_32_bytes_minimum_length!!"
+            hil_secret = "phase69_hil_secret_32_bytes_minimum_length!!"
+            firebase_sync.auth.verification_key = jwt_secret
+            firebase_sync.auth.allowed_algorithms = ["HS256"]
+            ring = HILKeyRing(keys={"default": hil_secret}, active_key_id="default")
+            reset_authorization_boundary(signing_key=ring)
+            token = jwt.encode(
+                {
+                    "sub": "analyst_p69",
+                    "email": "analyst@lab.local",
+                    "role": "ANALYST",
+                    "tenant_id": "default_tenant",
+                    "iss": firebase_sync.auth.expected_issuer,
+                    "aud": firebase_sync.auth.expected_audience,
+                    "exp": _time.time() + 3600,
+                },
+                jwt_secret,
+                algorithm="HS256",
+            )
+            principal = firebase_sync.auth.verify_bearer_token(f"Bearer {token}")
+            target_sha = ProvenanceManager.compute_hashes(sample_path)["sha256"]
+            grant = ApprovalIssuer(key_ring=ring).issue_grant(
+                approver=principal,
+                operation=OperationType.MODIFY_ARTIFACT,
+                target_path=sample_path,
+                target_sha256=target_sha,
+                tenant_id="default_tenant",
+                parameters={"offset": "68", "operation": "invert"},
+            )
             patch_req = urllib.request.Request(
                 f"{base_url}/api/patch?path={sample_path}",
-                data=json.dumps({"offset": "68", "operation": "invert"}).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                data=json.dumps({"offset": "68", "operation": "invert", "approval_grant": grant.to_dict()}).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                },
                 method="POST",
             )
             with urllib.request.urlopen(patch_req) as r_p:

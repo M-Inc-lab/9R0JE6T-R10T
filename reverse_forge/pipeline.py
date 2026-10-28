@@ -1,7 +1,8 @@
 import re
 """
 R3V3R53//F0RG3 — 12-Stage Pipeline State Machine & Autonomy Coordinator (§03.2, §16, §17)
-Coordinates Stage 0–11 autonomous progression, Human-In-the-Loop (HIL) gates, and anti-loop guards.
+Coordinates Stage 0–11 progression, mandatory Human-In-the-Loop (HIL) gates, direct handler
+authorization enforcement, TOCTOU working-copy integrity verification, and anti-loop guards.
 """
 
 import enum
@@ -10,7 +11,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from reverse_forge.correlation_engine import CorrelationEngine
 from reverse_forge.elf_analyzer import ELFAnalyzer
@@ -28,7 +29,11 @@ from reverse_forge.authorization import (
     OperationType,
     get_authorization_boundary,
 )
-from reverse_forge.firebase_sync import AuthUserContext, UserRole
+from reverse_forge.firebase_sync import (
+    AuthUserContext,
+    UserRole,
+    _create_sealed_user_context,
+)
 
 
 class AutonomyLevel(enum.IntEnum):
@@ -36,7 +41,14 @@ class AutonomyLevel(enum.IntEnum):
     INTERACTIVE = 1         # Asks operator before any high-privilege tool or transition
     SUPERVISED = 2          # (Default) Pauses at risk boundaries & confirmation steps
     AUTONOMOUS = 3          # Automatic progression through all static & headless stages
-    CONTINUOUS = 4          # Unconstrained end-to-end self-directing audit
+    CONTINUOUS = 4          # Unconstrained end-to-end self-directing static audit
+
+    # Aliases for backward compatibility with GUI / API callers
+    LEVEL_0_MANUAL = 0
+    LEVEL_1_INTERACTIVE = 1
+    LEVEL_2_SUPERVISED = 2
+    LEVEL_3_AUTONOMOUS_STATIC = 3
+    LEVEL_4_CONTINUOUS = 4
 
 
 class StageStatus(enum.Enum):
@@ -100,33 +112,48 @@ class PipelineStateMachine:
         autonomy_level: AutonomyLevel = AutonomyLevel.SUPERVISED,
         scope_ledger: Optional[ScopeLedger] = None,
         workspace_dir: Optional[str] = None,
-        hil_callback: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
+        hil_callback: Optional[Callable[[str, Dict[str, Any]], Union[bool, ApprovalGrant]]] = None,
         principal: Optional[AuthUserContext] = None,
         tenant_id: str = "default_tenant",
         approval_grant: Optional[ApprovalGrant] = None,
         strict_auth: bool = False,
+        authorization_boundary: Optional[CentralAuthorizationBoundary] = None,
     ):
         self.artifact_path = os.path.abspath(artifact_path)
-        self.autonomy_level = autonomy_level
+        self.autonomy_level = AutonomyLevel(int(autonomy_level))
         self.tenant_id = tenant_id
-        self.principal = principal or AuthUserContext(
-            uid="local_operator",
-            email="operator@reverse-forge.local",
-            role=UserRole.ANALYST,
-            tenant_id=tenant_id,
-            is_verified=True,
-        )
+        is_prod = os.environ.get("REVERSE_FORGE_ENV", "").strip().lower() == "production"
+        self.strict_auth = bool(strict_auth or is_prod)
+
+        if principal is not None:
+            self.principal: Optional[AuthUserContext] = principal
+        elif is_prod:
+            # Fail-closed in production when no principal is supplied
+            self.principal = None
+        else:
+            # Local single-operator CLI/test context sealed through internal authority
+            self.principal = _create_sealed_user_context(
+                uid="local_operator",
+                email="operator@reverse-forge.local",
+                role=UserRole.ANALYST,
+                tenant_id=tenant_id,
+            )
+
         self.active_approval_grant = approval_grant
-        self.strict_auth = strict_auth
-        self.authorization_boundary = get_authorization_boundary()
+        self.authorization_boundary = authorization_boundary or get_authorization_boundary()
+        self.provenance_mgr = ProvenanceManager(workspace_dir)
+
         if scope_ledger is not None:
             self.scope_ledger = scope_ledger
+            self._has_custom_scope_ledger = True
         else:
-            # Default to restricted scope locked strictly to the specific canonical artifact path (fail-closed)
+            self._has_custom_scope_ledger = False
             target_real = os.path.realpath(self.artifact_path)
+            ws_real = os.path.realpath(self.provenance_mgr.workspace_root)
+            base_name = os.path.basename(self.artifact_path)
             self.scope_ledger = ScopeLedger(
-                allowed_patterns=[os.path.basename(self.artifact_path)],
-                allowed_paths=[target_real, os.path.dirname(target_real)],
+                allowed_patterns=[base_name, f"*_{base_name}"],
+                allowed_paths=[target_real, os.path.dirname(target_real), ws_real],
                 default_actions=[
                     ActionPermission.READ_HASH,
                     ActionPermission.STATIC_ANALYSIS,
@@ -135,7 +162,7 @@ class PipelineStateMachine:
                 ],
                 allow_all=False,
             )
-        self.provenance_mgr = ProvenanceManager(workspace_dir)
+
         self.hil_callback = hil_callback
         self.loop_guard = AntiLoopGuard()
 
@@ -146,6 +173,7 @@ class PipelineStateMachine:
         self.correlation_results: Dict[str, Any] = {}
         self.ghidra_results: Dict[str, Any] = {}
         self.report_generator: Optional[ReportGenerator] = None
+        self._active_stage_gate: Set[int] = set()
 
         self.stages: Dict[int, StageRecord] = {
             i: StageRecord(stage_id=i, name=self.STAGE_NAMES[i]) for i in range(12)
@@ -156,7 +184,7 @@ class PipelineStateMachine:
         rec.status = status
         if status == StageStatus.RUNNING:
             rec.started_at = datetime.now(timezone.utc).isoformat()
-        elif status in (StageStatus.COMPLETED, StageStatus.FAILED, StageStatus.SKIPPED):
+        elif status in (StageStatus.COMPLETED, StageStatus.FAILED, StageStatus.SKIPPED, StageStatus.BLOCKED_HIL):
             rec.finished_at = datetime.now(timezone.utc).isoformat()
             rec.output_summary = summary
             rec.error = error
@@ -172,8 +200,8 @@ class PipelineStateMachine:
         7: ActionPermission.DYNAMIC_SANDBOX,
         8: ActionPermission.STATIC_ANALYSIS,
         9: ActionPermission.STATIC_ANALYSIS,
-        10: ActionPermission.STATIC_ANALYSIS,
-        11: ActionPermission.STATIC_ANALYSIS,
+        10: ActionPermission.EXPORT_REPORT,
+        11: ActionPermission.MODIFY_ARTIFACT,
     }
 
     STAGE_OPERATION_MAP = {
@@ -191,6 +219,41 @@ class PipelineStateMachine:
         11: OperationType.REMEDIATION_PATCH,
     }
 
+    def _resolve_target_sha256(self) -> str:
+        if self.provenance and self.provenance.sha256:
+            return self.provenance.sha256
+        if self.binary_bytes:
+            return hashlib.sha256(self.binary_bytes).hexdigest()
+        if os.path.isfile(self.artifact_path):
+            return ProvenanceManager.compute_hashes(self.artifact_path)["sha256"]
+        return ""
+
+    def _resolve_stage_target_path(self, stage_id: int) -> str:
+        """
+        For stages that generate reports or synthesize patches in the isolated workspace
+        (Stages 10 & 11), resolve to `working_copy_path` when the original artifact resides
+        in a read-only system directory (`/bin`, `/usr/bin`) and the default workspace ledger is active.
+        """
+        if (
+            stage_id in (10, 11)
+            and not self._has_custom_scope_ledger
+            and self.provenance is not None
+            and os.path.exists(self.provenance.working_copy_path)
+        ):
+            return self.provenance.working_copy_path
+        return self.artifact_path
+
+    def _verify_toctou_integrity(self, stage_id: int) -> Tuple[bool, str]:
+        """Re-verify working copy and source artifact SHA-256 before executing stages 1..11."""
+        if stage_id > 0 and self.provenance is not None:
+            if not self.provenance_mgr.verify_working_copy_integrity(self.provenance):
+                return False, "TOCTOU integrity violation: isolated working copy was modified or removed"
+            if os.path.isfile(self.artifact_path):
+                current_hashes = ProvenanceManager.compute_hashes(self.artifact_path)
+                if current_hashes["sha256"] != self.provenance.sha256:
+                    return False, "TOCTOU integrity violation: source artifact changed on disk after Stage 0 ingestion"
+        return True, "OK"
+
     def _check_hil_gate(
         self,
         prompt: str,
@@ -201,14 +264,17 @@ class PipelineStateMachine:
         """
         Enforce mandatory human approval and scope authorization through CentralAuthorizationBoundary (§04).
         Autonomous mode CANNOT bypass security policies for sensitive actions.
-        Missing HIL callback strictly denies sensitive actions (fail-closed).
+        Missing HIL callback or missing signing key strictly denies sensitive actions (fail-closed).
         """
-        # 1. Mandatory Scope Check first: ScopeLedger must authorize the action
         if not self.scope_ledger.is_authorized(self.artifact_path, action=action):
             return False
 
+        toctou_ok, _ = self._verify_toctou_integrity(context.get("stage", 7))
+        if not toctou_ok:
+            return False
+
         op = operation or (OperationType.DYNAMIC_SANDBOX if action == ActionPermission.DYNAMIC_SANDBOX else OperationType.STATIC_ANALYSIS)
-        target_sha256 = self.provenance.sha256 if self.provenance else hashlib.sha256(self.binary_bytes).hexdigest()
+        target_sha256 = self._resolve_target_sha256()
 
         permitted, decision, reason, grant = self.authorization_boundary.evaluate_request(
             principal=self.principal,
@@ -223,8 +289,52 @@ class PipelineStateMachine:
             autonomy_level=self.autonomy_level.value,
         )
         if permitted and grant:
-            self.active_approval_grant = grant
+            # Single-use grant has been consumed; clear active_approval_grant so it is not reused automatically
+            self.active_approval_grant = None
         return permitted
+
+    def _enforce_direct_stage_entry(self, stage_id: int, raise_on_deny: bool = False) -> bool:
+        """
+        Guard every `_stage_N()` method against direct invocation that bypasses `execute_stage()`.
+        """
+        if stage_id in self._active_stage_gate:
+            return True
+
+        toctou_ok, toctou_err = self._verify_toctou_integrity(stage_id)
+        if not toctou_ok:
+            self._mark_stage(stage_id, StageStatus.FAILED, error=toctou_err)
+            if raise_on_deny:
+                raise AuthorizationDeniedError(AuthorizationDecision.DENIED_HIL_TARGET_MISMATCH, toctou_err, {})
+            return False
+
+        op = self.STAGE_OPERATION_MAP.get(stage_id, OperationType.STATIC_ANALYSIS)
+        target_path = self._resolve_stage_target_path(stage_id)
+        target_sha256 = self._resolve_target_sha256()
+
+        permitted, decision, reason, grant = self.authorization_boundary.evaluate_request(
+            principal=self.principal,
+            operation=op,
+            target_path=target_path,
+            target_sha256=target_sha256,
+            target_tenant_id=self.tenant_id,
+            parameters={"stage": stage_id},
+            scope_ledger=self.scope_ledger,
+            approval_grant=self.active_approval_grant,
+            hil_callback=self.hil_callback,
+            autonomy_level=self.autonomy_level.value,
+        )
+        if permitted and grant:
+            self.active_approval_grant = None
+
+        if not permitted:
+            if raise_on_deny:
+                raise AuthorizationDeniedError(decision, reason, {})
+            if op in self.authorization_boundary.MANDATORY_HIL_OPERATIONS:
+                self._mark_stage(stage_id, StageStatus.SKIPPED, summary=f"Skipped: {reason}")
+            else:
+                self._mark_stage(stage_id, StageStatus.FAILED, error=f"Security Policy Denied: {reason}")
+            return False
+        return True
 
     def run_all(self) -> Dict[str, Any]:
         """Execute the full 12-stage pipeline sequentially."""
@@ -234,31 +344,55 @@ class PipelineStateMachine:
                 break
         return self.get_pipeline_state()
 
+    def run_all_stages(self) -> Dict[str, Any]:
+        """Alias for `run_all()` used by REST API / background job callers."""
+        return self.run_all()
+
     def execute_stage(self, stage_id: int) -> bool:
         req_action = self.STAGE_REQUIRED_PERMISSIONS.get(stage_id, ActionPermission.STATIC_ANALYSIS)
-        if not self.scope_ledger.is_authorized(self.artifact_path, action=req_action):
-            # If sensitive optional stage (like dynamic sandbox), mark SKIPPED with reason
-            if req_action in (ActionPermission.DYNAMIC_SANDBOX, ActionPermission.NETWORK_ACCESS):
-                self._mark_stage(
-                    stage_id,
-                    StageStatus.SKIPPED,
-                    summary=f"Skipped: Action '{req_action.value}' not authorized in ScopeLedger policy"
-                )
-                return True
+        target_path = self._resolve_stage_target_path(stage_id)
+
+        if not self.scope_ledger.is_authorized(target_path, action=req_action):
+            if req_action in (ActionPermission.DYNAMIC_SANDBOX, ActionPermission.NETWORK_ACCESS, ActionPermission.MODIFY_ARTIFACT) and stage_id in (7, 11):
+                if stage_id == 7 and not self.strict_auth:
+                    self._mark_stage(
+                        stage_id,
+                        StageStatus.SKIPPED,
+                        summary=f"Skipped: Action '{req_action.value}' not authorized in ScopeLedger policy",
+                    )
+                    return True
+                if stage_id == 7 and self.strict_auth:
+                    self._mark_stage(
+                        stage_id,
+                        StageStatus.SKIPPED,
+                        summary=f"Skipped: Action '{req_action.value}' not authorized in ScopeLedger policy",
+                    )
+                    return False
+                if stage_id == 11 and not self.strict_auth:
+                    self._mark_stage(
+                        stage_id,
+                        StageStatus.SKIPPED,
+                        summary=f"Skipped: Action '{req_action.value}' not authorized in ScopeLedger policy",
+                    )
+                    return True
             self._mark_stage(
                 stage_id,
                 StageStatus.FAILED,
-                error=f"Security Policy Denied: Action '{req_action.value}' not authorized by ScopeLedger for target '{self.artifact_path}'"
+                error=f"Security Policy Denied: Action '{req_action.value}' not authorized by ScopeLedger for target '{target_path}'",
             )
             return False
 
-        # Central authorization boundary evaluation
+        toctou_ok, toctou_err = self._verify_toctou_integrity(stage_id)
+        if not toctou_ok:
+            self._mark_stage(stage_id, StageStatus.FAILED, error=toctou_err)
+            return False
+
         op = self.STAGE_OPERATION_MAP.get(stage_id, OperationType.STATIC_ANALYSIS)
-        target_sha256 = self.provenance.sha256 if self.provenance else (hashlib.sha256(self.binary_bytes).hexdigest() if self.binary_bytes else "")
+        target_sha256 = self._resolve_target_sha256()
         permitted, decision, reason, grant = self.authorization_boundary.evaluate_request(
             principal=self.principal,
             operation=op,
-            target_path=self.artifact_path,
+            target_path=target_path,
             target_sha256=target_sha256,
             target_tenant_id=self.tenant_id,
             parameters={"stage": stage_id},
@@ -267,12 +401,15 @@ class PipelineStateMachine:
             hil_callback=self.hil_callback if op in self.authorization_boundary.MANDATORY_HIL_OPERATIONS else None,
             autonomy_level=self.autonomy_level.value,
         )
+        if permitted and grant:
+            self.active_approval_grant = None
+
         if not permitted:
             if op in self.authorization_boundary.MANDATORY_HIL_OPERATIONS and not self.strict_auth:
                 self._mark_stage(
                     stage_id,
                     StageStatus.SKIPPED,
-                    summary=f"Skipped: Operator declined or unauthorized ({reason})"
+                    summary=f"Skipped: Operator declined or unauthorized ({reason})",
                 )
                 return True
             self._mark_stage(
@@ -295,13 +432,20 @@ class PipelineStateMachine:
                 self._mark_stage(stage_id, StageStatus.SKIPPED, summary="No handler defined")
                 return True
 
-            return handler()
+            self._active_stage_gate.add(stage_id)
+            try:
+                return handler()
+            finally:
+                self._active_stage_gate.discard(stage_id)
         except Exception as e:
             self._mark_stage(stage_id, StageStatus.FAILED, error=str(e))
             return False
 
     # Stage 0: Input & Scope Verification
     def _stage_0(self) -> bool:
+        if not self._enforce_direct_stage_entry(0, raise_on_deny=self.strict_auth):
+            return False
+
         self.provenance = self.provenance_mgr.ingest_artifact(
             self.artifact_path, scope_ledger=self.scope_ledger
         )
@@ -323,6 +467,9 @@ class PipelineStateMachine:
 
     # Stage 1: File & Format Reconnaissance
     def _stage_1(self) -> bool:
+        if not self._enforce_direct_stage_entry(1, raise_on_deny=self.strict_auth):
+            return False
+
         engine = CorrelationEngine()
         self.format_name = engine.identify_format(self.binary_bytes)
         summary = f"Detected binary format: {self.format_name}"
@@ -331,9 +478,12 @@ class PipelineStateMachine:
 
     # Stage 2: Extraction & Wrapper Identification
     def _stage_2(self) -> bool:
+        if not self._enforce_direct_stage_entry(2, raise_on_deny=self.strict_auth):
+            return False
+
         entropy = PEAnalyzer.calculate_entropy(self.binary_bytes)
         packed = entropy > 7.2
-        
+
         from reverse_forge.layer_unpacker import LayerUnpacker
         containers = LayerUnpacker.identify_embedded_containers(self.binary_bytes)
         dotnet_info = LayerUnpacker.inspect_dotnet_metadata(self.binary_bytes)
@@ -358,6 +508,9 @@ class PipelineStateMachine:
 
     # Stage 3: Static Analysis & Surface Enumeration
     def _stage_3(self) -> bool:
+        if not self._enforce_direct_stage_entry(3, raise_on_deny=self.strict_auth):
+            return False
+
         if self.format_name == "PE":
             self.static_metadata = PEAnalyzer(self.binary_bytes).analyze()
         elif self.format_name == "ELF":
@@ -419,13 +572,14 @@ class PipelineStateMachine:
 
     # Stage 4: Structural & Architecture Reconstruction
     def _stage_4(self) -> bool:
-        # Multi-tool correlation: invoke Radare2 / Capstone via CorrelationEngine
+        if not self._enforce_direct_stage_entry(4, raise_on_deny=self.strict_auth):
+            return False
+
         corr = CorrelationEngine()
         self.correlation_results = corr.analyze_artifact(self.provenance.working_copy_path, run_ghidra=False)
         r2_funcs = self.correlation_results.get("tool_radare2", {}).get("functions_count", 0)
         cs_insns = len(self.correlation_results.get("tool_capstone", {}).get("disassembled_instructions", []))
 
-        # Native micro-decompilation + Phase 33 Region Structuring + Phase 34 Datalog/VSA sweep
         from reverse_forge.decompiler_engine import MicroDecompilerEngine
         from reverse_forge.datalog_vsa_engine import DatalogVSAEngine
         decompiler = MicroDecompilerEngine()
@@ -447,14 +601,15 @@ class PipelineStateMachine:
 
     # Stage 5: Data-Flow & Input-Control Analysis
     def _stage_5(self) -> bool:
-        # 1. Attempt headless Ghidra extraction if available
+        if not self._enforce_direct_stage_entry(5, raise_on_deny=self.strict_auth):
+            return False
+
         ghidra = GhidraHeadlessAnalyzer()
         self.ghidra_results = ghidra.analyze(self.provenance.working_copy_path, timeout=60)
         g_analysis = self.ghidra_results.get("analysis", {})
         decomp_list = self.ghidra_results.get("decompiled_functions") or g_analysis.get("decompiled_functions", [])
         decomp_count = len(decomp_list)
 
-        # 2. Build Call-Graph & Taint Flow analysis
         from reverse_forge.dataflow_engine import DataFlowGraph
         dfg = DataFlowGraph()
         sinks = dict(self.ghidra_results.get("sink_xrefs", {}))
@@ -468,7 +623,6 @@ class PipelineStateMachine:
         if sinks:
             dfg.build_from_xrefs(sinks)
 
-        # Also add imported symbols to call-graph so co-occurring sources & sinks are detected
         for sym in self.static_metadata.get("imported_symbols", []):
             clean_sym = str(sym).lstrip("_")
             if clean_sym:
@@ -493,7 +647,6 @@ class PipelineStateMachine:
                 remediation=f"Sanitize data from `{flow.source_name}` before invoking `{flow.sink_name}`."
             ))
 
-        # 3. Interprocedural pointer alias & heap lifecycle analysis over decompiled pseudocode
         from reverse_forge.pointer_alias_engine import PointerAliasEngine
         pae = PointerAliasEngine()
         for dfn in decomp_list:
@@ -532,8 +685,10 @@ class PipelineStateMachine:
 
     # Stage 6: Security Interface & Mitigations Analysis
     def _stage_6(self) -> bool:
+        if not self._enforce_direct_stage_entry(6, raise_on_deny=self.strict_auth):
+            return False
+
         severity_to_cvss = {"CRITICAL": 9.2, "HIGH": 7.8, "MEDIUM": 5.5, "LOW": 3.5}
-        # Evaluate platform mitigations and dangerous calls
         if self.format_name == "PE":
             try:
                 from reverse_forge.windows_engine import WindowsEngine
@@ -583,7 +738,6 @@ class PipelineStateMachine:
                     remediation="Recompile with PIE, non-executable stack, Full RELRO, and bounded string APIs."
                 ))
 
-        # Cryptographic algorithms & embedded secrets scan
         from reverse_forge.crypto_engine import CryptoSecretEngine
         crypto_engine = CryptoSecretEngine()
         crypto_audit = crypto_engine.full_crypto_audit(self.binary_bytes)
@@ -635,14 +789,16 @@ class PipelineStateMachine:
 
     # Stage 7: Sandboxed Dynamic Analysis (Optional/Gated)
     def _stage_7(self) -> bool:
-        authorized = self._check_hil_gate(
-            "Execute dynamic behavioral analysis in sandbox?",
-            {"target": self.artifact_path, "stage": 7},
-            action=ActionPermission.DYNAMIC_SANDBOX,
-        )
-        if not authorized:
-            self._mark_stage(7, StageStatus.SKIPPED, summary="Operator declined sandboxed dynamic execution.")
-            return False if self.strict_auth else True
+        # Always enforce HIL gate inside _stage_7 even when invoked via execute_stage or directly
+        if 7 not in self._active_stage_gate:
+            authorized = self._check_hil_gate(
+                "Execute dynamic behavioral analysis in sandbox?",
+                {"target": self.artifact_path, "stage": 7},
+                action=ActionPermission.DYNAMIC_SANDBOX,
+            )
+            if not authorized:
+                self._mark_stage(7, StageStatus.SKIPPED, summary="Operator declined or unauthorized for sandboxed dynamic execution.")
+                return False if self.strict_auth else True
 
         from reverse_forge.windows_sandbox import WindowsSandbox
         from reverse_forge.posix_sandbox import POSIXSandboxEngine
@@ -665,14 +821,17 @@ class PipelineStateMachine:
         FridaDBIEngine.write_frida_script(frida_js, hook_syms)
 
         summary = (
-            f"Generated Windows (.wsb/PS1) & Linux/POSIX (bwrap/strace) isolation runners "
-            f"plus Frida DBI script ({len(hook_syms)} hooks)"
+            f"Generated Windows (.wsb/PS1) & Linux/POSIX (bwrap/strace) isolation runner scripts "
+            f"plus Frida DBI script ({len(hook_syms)} hooks); binary was NOT dynamically executed on host"
         )
         self._mark_stage(7, StageStatus.COMPLETED, summary=summary)
         return True
 
     # Stage 8: Hypothesis Validation & Correlation
     def _stage_8(self) -> bool:
+        if not self._enforce_direct_stage_entry(8, raise_on_deny=self.strict_auth):
+            return False
+
         # 1. Cross-reference static findings with discovered xrefs/sinks
         sinks = self.ghidra_results.get("sink_xrefs", {})
         for sink_name, callers in sinks.items():
@@ -694,12 +853,11 @@ class PipelineStateMachine:
                     remediation=f"Replace `{sink_name}` with safe bounded alternative."
                 ))
 
-        # 2. Concolic path exploration & exploit payload synthesis for sinks
+        # 2. Concolic hypothesis modeling for sinks (explicitly labeled as heuristic / Possible, never Confirmed)
         from reverse_forge.concolic_engine import ConcolicPathPruner
         from reverse_forge.smt_solver_engine import PathConstraint
         concolic_pruner = ConcolicPathPruner()
         for sink_name in sinks.keys():
-            # Synthesize trigger for potential unbounded length
             synth_res = concolic_pruner.synthesize_exploit_trigger(
                 path_constraints=[PathConstraint(var="input_len", op="GT", value=0)],
                 length_var="input_len",
@@ -709,19 +867,19 @@ class PipelineStateMachine:
             if synth_res.is_satisfiable:
                 self.report_generator.add_finding(Finding(
                     finding_id=f"SYNTH-SAT-{sink_name.upper()}",
-                    title=f"SMT Proven Exploit Trigger Payload: {sink_name}",
-                    vulnerability_class="Mathematically Proven Out-of-Bounds Condition",
-                    confidence="Confirmed",
-                    cvss_score=9.1,
+                    title=f"Heuristic Concolic Hypothesis (Unverified Buffer Guard): {sink_name}",
+                    vulnerability_class="Heuristic Symbolic Hypothesis (Requires Path-Guard Verification)",
+                    confidence="Possible",
+                    cvss_score=5.3,
                     cwe_id="CWE-787",
                     function_symbol=sink_name,
-                    address_or_offset="Concolic AST Path",
-                    what=synth_res.solver_notes,
-                    why="Solver mathematically derived an unconstrained input triggering memory corruption.",
+                    address_or_offset="Concolic AST Hypothesis",
+                    what=f"[Heuristic Hypothesis] {synth_res.solver_notes}",
+                    why="Symbolic model evaluated an assumed unguarded input length parameter against a nominal 512-byte buffer; actual binary path guards require manual or DWARF-assisted verification.",
                     where=f"Call path to {sink_name}",
-                    when="Input parsing before length validation",
-                    how=f"Supplying input matching payload model {synth_res.payload_input} exceeds buffer capacity.",
-                    remediation="Insert strict upper-bound invariant check: `if (input_len > 512) return -1;`"
+                    when="Input parsing if length validation is absent",
+                    how=f"If input length is unguarded, supplying payload model {synth_res.payload_input} would exceed a 512-byte buffer.",
+                    remediation="Verify whether caller enforces an upper-bound check before invoking sink; if absent, insert `if (input_len > capacity) return -1;`"
                 ))
 
         # 3. Correlate with behavioral telemetry traces if available
@@ -748,42 +906,59 @@ class PipelineStateMachine:
                     remediation="Validate execution environment and apply least-privilege confinement."
                 ))
 
-        summary = "Correlated static headers, decompiled call-paths, concolic exploit models, and runtime telemetry."
+        summary = "Correlated static headers, decompiled call-paths, heuristic concolic hypotheses, and runtime telemetry."
         self._mark_stage(8, StageStatus.COMPLETED, summary=summary)
         return True
 
     # Stage 9: Finding Scoring & CVSS/CWE Triage
     def _stage_9(self) -> bool:
+        if not self._enforce_direct_stage_entry(9, raise_on_deny=self.strict_auth):
+            return False
+
         summary = f"Scored {len(self.report_generator.findings)} findings against CVSS 4.0 / CWE"
         self._mark_stage(9, StageStatus.COMPLETED, summary=summary)
         return True
 
     # Stage 10: Reproducibility & Report Generation
     def _stage_10(self) -> bool:
+        if not self._enforce_direct_stage_entry(10, raise_on_deny=self.strict_auth):
+            return False
+
         summary = "Dual Executive Summary & Technical Triage report formatted"
         self._mark_stage(10, StageStatus.COMPLETED, summary=summary)
         return True
 
     # Stage 11: Defensive Remediation Synthesis
     def _stage_11(self) -> bool:
-        target_sha256 = self.provenance.sha256 if self.provenance else (hashlib.sha256(self.binary_bytes).hexdigest() if self.binary_bytes else "")
-        permitted, decision, reason, grant = self.authorization_boundary.evaluate_request(
-            principal=self.principal,
-            operation=OperationType.REMEDIATION_PATCH,
-            target_path=self.artifact_path,
-            target_sha256=target_sha256,
-            target_tenant_id=self.tenant_id,
-            parameters={"stage": 11},
-            scope_ledger=self.scope_ledger,
-            approval_grant=self.active_approval_grant,
-            hil_callback=self.hil_callback,
-            autonomy_level=self.autonomy_level.value,
-        )
-        if not permitted:
-            if self.strict_auth:
-                raise AuthorizationDeniedError(decision, reason, {})
-            self._mark_stage(11, StageStatus.SKIPPED, summary=f"Central boundary denied remediation synthesis: {reason}")
-            return False
+        if 11 not in self._active_stage_gate:
+            toctou_ok, toctou_err = self._verify_toctou_integrity(11)
+            if not toctou_ok:
+                if self.strict_auth:
+                    raise AuthorizationDeniedError(AuthorizationDecision.DENIED_HIL_TARGET_MISMATCH, toctou_err, {})
+                self._mark_stage(11, StageStatus.FAILED, error=toctou_err)
+                return False
+
+            target_path = self._resolve_stage_target_path(11)
+            target_sha256 = self._resolve_target_sha256()
+            permitted, decision, reason, grant = self.authorization_boundary.evaluate_request(
+                principal=self.principal,
+                operation=OperationType.REMEDIATION_PATCH,
+                target_path=target_path,
+                target_sha256=target_sha256,
+                target_tenant_id=self.tenant_id,
+                parameters={"stage": 11},
+                scope_ledger=self.scope_ledger,
+                approval_grant=self.active_approval_grant,
+                hil_callback=self.hil_callback,
+                autonomy_level=self.autonomy_level.value,
+            )
+            if permitted and grant:
+                self.active_approval_grant = None
+            if not permitted:
+                if self.strict_auth:
+                    raise AuthorizationDeniedError(decision, reason, {})
+                self._mark_stage(11, StageStatus.SKIPPED, summary=f"Central boundary denied remediation synthesis: {reason}")
+                return False
 
         from reverse_forge.remediation_engine import RemediationEngine
         from reverse_forge.patch_verifier import PatchVerifier
@@ -792,9 +967,8 @@ class PipelineStateMachine:
         remediation_count = 0
         verified_count = 0
 
-        # Synthesize patches and regression harnesses for confirmed findings
         for f in self.report_generator.findings:
-            if f.confidence in ("Confirmed", "Probable") and f.cwe_id:
+            if f.confidence in ("Confirmed", "Probable", "Possible") and f.cwe_id:
                 patch = rem_engine.generate_defensive_patch(f.finding_id, f.cwe_id, f.function_symbol)
                 harness = rem_engine.generate_regression_test_harness(self.provenance.artifact_name, f.cwe_id)
                 v_report = verifier.verify_patch_resilience(patch)
@@ -834,4 +1008,3 @@ class PipelineStateMachine:
 
 # Canonical export alias
 ReverseForgePipeline = PipelineStateMachine
-
