@@ -3912,14 +3912,14 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
         raw_body = self.rfile.read(content_len)
 
         if path == "/api/upload":
-            if self.strict_auth or firebase_sync.auth.is_production or self.headers.get("Authorization"):
-                user = self._get_auth_user()
-                if not user or not user.is_cryptographically_verified():
-                    self._json_response({"status": "error", "error": "Authentication required for upload"}, status=401)
-                    return
-                if not user.can_modify():
-                    self._json_response({"status": "error", "error": "Insufficient RBAC role for upload"}, status=403)
-                    return
+            # Phase 4.2: authentication is mandatory unconditionally for all write endpoints.
+            user = self._get_auth_user()
+            if not user or not user.is_cryptographically_verified():
+                self._json_response({"status": "error", "error": "Authentication required for upload"}, status=401)
+                return
+            if not user.can_modify():
+                self._json_response({"status": "error", "error": "Insufficient RBAC role for upload"}, status=403)
+                return
             raw_fname = query.get("filename", ["uploaded.bin"])[0]
             safe_fname = "".join(c if (c.isalnum() or c in "._-") else "_" for c in os.path.basename(raw_fname)) or "uploaded.bin"
             upload_dir = os.path.join(tempfile.gettempdir(), "reverse_forge_uploads")
@@ -3936,14 +3936,14 @@ class GUIWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == "/api/annotate":
-            if self.strict_auth or firebase_sync.auth.is_production or self.headers.get("Authorization"):
-                user = self._get_auth_user()
-                if not user or not user.is_cryptographically_verified():
-                    self._json_response({"status": "error", "error": "Authentication required for annotation"}, status=401)
-                    return
-                if not user.can_modify():
-                    self._json_response({"status": "error", "error": "Insufficient RBAC role for annotation"}, status=403)
-                    return
+            # Phase 4.2: authentication is mandatory unconditionally for all write endpoints.
+            user = self._get_auth_user()
+            if not user or not user.is_cryptographically_verified():
+                self._json_response({"status": "error", "error": "Authentication required for annotation"}, status=401)
+                return
+            if not user.can_modify():
+                self._json_response({"status": "error", "error": "Insufficient RBAC role for annotation"}, status=403)
+                return
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
                 act = payload.get("action", "")

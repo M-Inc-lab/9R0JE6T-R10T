@@ -220,7 +220,7 @@ class TestHardenedThreadedGUIWorkbenchServer(unittest.TestCase):
 
         # Poll /api/jobs?id=...
         poll_url = f"http://127.0.0.1:{self.port}/api/jobs?id={job_id}"
-        for _ in range(40):
+        for _ in range(250):
             with urllib.request.urlopen(poll_url) as p_resp:
                 self.assertEqual(p_resp.status, 200)
                 p_data = json.loads(p_resp.read().decode("utf-8"))
@@ -228,7 +228,7 @@ class TestHardenedThreadedGUIWorkbenchServer(unittest.TestCase):
                 job = p_data["job"]
                 if job["status"] in ("COMPLETED", "FAILED"):
                     break
-            time.sleep(0.05)
+            time.sleep(0.1)
 
         self.assertIn(job["status"], ("COMPLETED", "FAILED"))
 

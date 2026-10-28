@@ -168,12 +168,12 @@ jobs:
                                 "pyjwt>=2.8.0" "cryptography>=41.0.0" pytest
           python -m pip install --no-cache-dir .
 
-      - name: "[P0] Phase 4.1 Trust Boundary, HIL Signing, Atomic Replay & Entry-Point Suite"
+      - name: "[P0] Phase 4.1 & 4.2 Trust Boundary, HIL Bypass Closure & Entry-Point Suite"
         env:
           PYTHONUTF8: "1"
         run: |
           set -euo pipefail
-          pytest tests/test_phase4_auth_hardening.py tests/test_phase4_authorization_bypass.py -v --tb=short
+          pytest tests/test_phase4_auth_hardening.py tests/test_phase4_authorization_bypass.py tests/test_phase4_2_hil_bypass_closure.py -v --tb=short
 
       - name: "[P0] Authentication — Fail-Closed JWT, Role & Tenant Isolation Suite"
         env:

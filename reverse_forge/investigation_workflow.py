@@ -302,17 +302,31 @@ class InvestigationWorkflowEngine:
     ) -> InvestigationState:
         """
         Process operator HIL decision to resume execution.
-        When `strict_auth=True`, `REVERSE_FORGE_ENV=production`, or `principal`/`approval_grant`
-        is supplied for `APPROVE_SANDBOXED`, enforces `CentralAuthorizationBoundary` verification.
+
+        Phase 4.2: Authorization is ALWAYS enforced for APPROVE_SANDBOXED decisions.
+        The previous conditional gate (`strict_auth or is_prod or principal is not None ...`)
+        has been removed. Every dynamic execution approval must pass through
+        `CentralAuthorizationBoundary.evaluate_request()` regardless of environment,
+        development mode, or whether a principal/grant was supplied. Missing or
+        unverified credentials fail closed.
+
+        REJECT_STATIC_ONLY decisions do not trigger dynamic execution and do not
+        require HIL authorization.
+
+        The `strict_auth` parameter is retained for API compatibility but is now a no-op;
+        enforcement is always active.
         """
         state = self.get_investigation(inv_id)
         if not state or state.status != "BLOCKED_HIL":
             raise ValueError(f"Investigation is not waiting for HIL approval: {inv_id}")
 
-        is_prod = os.environ.get("REVERSE_FORGE_ENV", "").strip().lower() == "production"
-        enforce_boundary = bool(strict_auth or is_prod or principal is not None or approval_grant is not None)
+        if decision not in ("APPROVE_SANDBOXED", "REJECT_STATIC_ONLY"):
+            raise ValueError(f"Invalid HIL decision '{decision}': must be APPROVE_SANDBOXED or REJECT_STATIC_ONLY")
 
-        if decision == "APPROVE_SANDBOXED" and enforce_boundary:
+        verified_grant_id: Optional[str] = None
+
+        if decision == "APPROVE_SANDBOXED":
+            # Phase 4.2: unconditional authorization enforcement — no environment bypass.
             auth_boundary = boundary or self.authorization_boundary
             target_path = state.spec.target_artifact_path
             target_sha = state.target_sha256 or (
@@ -328,20 +342,30 @@ class InvestigationWorkflowEngine:
                 approval_grant=approval_grant,
             )
             if not permitted:
+                # Record denial in audit history before raising.
+                denial_rec = {
+                    "action": action,
+                    "decision": "DENIED",
+                    "operator": principal.uid if principal else operator,
+                    "grant_id": None,
+                    "denial_reason": dec.value if hasattr(dec, 'value') else str(dec),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                state.hil_history.append(denial_rec)
                 raise AuthorizationDeniedError(dec, reason, {})
             operator_id = principal.uid if principal else operator
-            grant_id = consumed_grant.grant_id if consumed_grant else None
-        else:
-            if decision not in ("APPROVE_SANDBOXED", "REJECT_STATIC_ONLY"):
-                raise ValueError(f"Invalid HIL decision '{decision}': must be APPROVE_SANDBOXED or REJECT_STATIC_ONLY")
+            verified_grant_id = consumed_grant.grant_id if consumed_grant else None
+        else:  # REJECT_STATIC_ONLY — no dynamic execution, no HIL grant required.
             operator_id = principal.uid if principal else operator
-            grant_id = None
 
         rec = {
             "action": action,
             "decision": decision,
             "operator": operator_id,
-            "grant_id": grant_id,
+            "grant_id": verified_grant_id,
+            # Phase 4.2: cryptographic_auth=True means the boundary was satisfied;
+            # False means REJECT_STATIC_ONLY (no dynamic execution authorized).
+            "cryptographic_auth": decision == "APPROVE_SANDBOXED",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         state.hil_history.append(rec)
@@ -617,8 +641,24 @@ class InvestigationWorkflowEngine:
         }
 
     def _is_hil_approved(self, state: InvestigationState, action: str) -> bool:
+        """
+        Returns True only if hil_history contains a record for `action` where:
+        - decision == "APPROVE_SANDBOXED", AND
+        - cryptographic_auth == True (set only by submit_hil_decision after the
+          CentralAuthorizationBoundary has successfully verified and consumed a grant).
+
+        Phase 4.2: Records written without cryptographic authorization (e.g., those
+        from the old non-production bypass path) will have cryptographic_auth=False
+        or absent, and are therefore rejected here. This prevents a history-poisoning
+        bypass where an attacker writes an approval record via another code path and
+        then causes _run_stage6_dynamic_execution to proceed.
+        """
         for rec in state.hil_history:
-            if rec.get("action") == action and rec.get("decision") == "APPROVE_SANDBOXED":
+            if (
+                rec.get("action") == action
+                and rec.get("decision") == "APPROVE_SANDBOXED"
+                and rec.get("cryptographic_auth") is True
+            ):
                 return True
         return False
 

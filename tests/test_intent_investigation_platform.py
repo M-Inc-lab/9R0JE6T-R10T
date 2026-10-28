@@ -143,7 +143,29 @@ class TestInvestigationWorkflowEngine(unittest.TestCase):
     """Test suite for 9-Stage Adaptive Investigation Lifecycle and HIL Gating."""
 
     def setUp(self) -> None:
-        self.engine = InvestigationWorkflowEngine()
+        from reverse_forge.authorization import (
+            ApprovalIssuer,
+            AuthorizationDeniedError,
+            CentralAuthorizationBoundary,
+            HILKeyRing,
+            OperationType,
+        )
+        from reverse_forge.firebase_sync import UserRole, _create_sealed_user_context
+
+        self.test_key = b"phase42-test-signing-key-0123456789abcdef0123456789abcdef"
+        self.key_ring = HILKeyRing.from_single_key(self.test_key, key_id="test-key-inv")
+        self.boundary = CentralAuthorizationBoundary(
+            signing_key=self.key_ring,
+            verify_target_on_disk=True,
+        )
+        self.issuer = ApprovalIssuer(key_ring=self.key_ring)
+        self.analyst = _create_sealed_user_context(
+            uid="lead_architect",
+            email="lead@example.com",
+            role=UserRole.LEAD_ARCHITECT,
+            tenant_id="default_tenant",
+        )
+        self.engine = InvestigationWorkflowEngine(authorization_boundary=self.boundary)
         self.target = "/bin/ls" if os.path.exists("/bin/ls") else __file__
 
     def test_static_lifecycle_to_completion(self) -> None:
@@ -163,6 +185,8 @@ class TestInvestigationWorkflowEngine(unittest.TestCase):
         self.assertIn("sigma_yaml", final_state.deliverables)
 
     def test_hil_safety_gate_blocking_and_approval(self) -> None:
+        from reverse_forge.authorization import AuthorizationDeniedError, OperationType
+
         # Crash root cause requires dynamic execution -> triggers HIL gate
         state = self.engine.create_investigation(
             "Find root cause of crash and memory fault",
@@ -177,11 +201,30 @@ class TestInvestigationWorkflowEngine(unittest.TestCase):
         self.assertIsNotNone(paused_state.hil_pending_request)
         self.assertEqual(paused_state.current_stage_idx, 5)
 
-        # Operator grants approval
+        # Phase 4.2 invariant: Unverified / missing credentials must fail closed
+        with self.assertRaises(AuthorizationDeniedError):
+            self.engine.submit_hil_decision(
+                state.investigation_id,
+                action="dynamic_execution",
+                decision="APPROVE_SANDBOXED",
+                operator="lead_architect",
+            )
+
+        # Operator grants approval with valid cryptographic grant
+        grant = self.issuer.issue_grant(
+            approver=self.analyst,
+            operation=OperationType.DYNAMIC_SANDBOX,
+            target_path=state.spec.target_artifact_path,
+            target_sha256=state.target_sha256,
+            tenant_id="default_tenant",
+            parameters={"investigation_id": state.investigation_id, "action": "dynamic_execution"},
+        )
         resumed_state = self.engine.submit_hil_decision(
             state.investigation_id,
             action="dynamic_execution",
             decision="APPROVE_SANDBOXED",
+            principal=self.analyst,
+            approval_grant=grant,
             operator="lead_architect",
         )
         self.assertEqual(resumed_state.status, "RUNNING")
