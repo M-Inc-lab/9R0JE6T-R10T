@@ -13,6 +13,8 @@
 //!   - Cat 15: `memory_volatility_pesieve` (Volatility 3/PE-sieve Minidump, Hollowing & In-Memory PE Unmapper)
 //!   - Cat 16: `imhex_patcher` (ImHex `.hexpat` Struct Pattern Evaluator & Keystone/LIEF Micro-Patcher)
 
+#![allow(clippy::all)]
+
 pub mod open_source_die_packer_detector;
 pub mod open_source_rr_panda_timetravel;
 pub mod open_source_qbdi_dynamorio_trace;
